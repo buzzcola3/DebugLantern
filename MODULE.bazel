@@ -1,8 +1,53 @@
 ###############################################################################
-# Bazel now uses Bzlmod by default to manage external dependencies.
-# Please consider migrating your external dependencies from WORKSPACE to MODULE.bazel.
-#
-# For more details, please check https://github.com/bazelbuild/bazel/issues/18958
+# DebugLantern – MODULE.bazel
 ###############################################################################
 
+module(
+    name = "debuglantern",
+    version = "0.1.0",
+)
+
+# ── Core build rules ────────────────────────────────────────────────────────
 bazel_dep(name = "rules_cc", version = "0.2.14")
+bazel_dep(name = "platforms", version = "0.0.11")
+
+# ── Hermetic C/C++ toolchain (zig-cc) ──────────────────────────────────────
+bazel_dep(name = "hermetic_cc_toolchain", version = "4.1.0")
+
+toolchains = use_extension(
+    "@hermetic_cc_toolchain//toolchain:ext.bzl",
+    "toolchains",
+)
+use_repo(toolchains, "zig_sdk")
+
+# Toolchains are NOT globally registered; use --config=<target> in .bazelrc
+# to select a specific zig cross-compilation toolchain.
+
+# ── Hermetic dependencies from BCR ─────────────────────────────────────────
+bazel_dep(name = "libuuid", version = "2.41.2")
+bazel_dep(name = "libexpat", version = "2.7.1.bcr.1")   # needed by dbus
+
+# ── Foreign build rules (for autotools-based deps) ─────────────────────────
+bazel_dep(name = "rules_foreign_cc", version = "0.15.1")
+
+# ── Third-party source archives (not in BCR) ───────────────────────────────
+http_archive = use_repo_rule(
+    "@bazel_tools//tools/build_defs/repo:http.bzl",
+    "http_archive",
+)
+
+http_archive(
+    name = "dbus",
+    build_file = "//third_party:dbus.BUILD",
+    sha256 = "ba1f21d2bd9d339da2d4aa8780c09df32fea87998b73da24f49ab9df1e36a50f",
+    strip_prefix = "dbus-1.14.10",
+    urls = ["https://dbus.freedesktop.org/releases/dbus/dbus-1.14.10.tar.xz"],
+)
+
+http_archive(
+    name = "avahi",
+    build_file = "//third_party:avahi.BUILD",
+    sha256 = "060309d7a333d38d951bc27598c677af1796934dbd98e1024e7ad8de798fedda",
+    strip_prefix = "avahi-0.8",
+    urls = ["https://github.com/avahi/avahi/releases/download/v0.8/avahi-0.8.tar.gz"],
+)

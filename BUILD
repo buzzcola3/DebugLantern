@@ -11,12 +11,11 @@ cc_binary(
     ],
     includes = ["src"],
     copts = ["-std=c++20"],
-    linkopts = [
-        "-lavahi-client",
-        "-lavahi-common",
-        "-lpthread",
-        "-luuid",
+    deps = [
+        "@avahi//:avahi",
+        "@libuuid",
     ],
+    linkopts = ["-lpthread"],
 )
 
 cc_binary(

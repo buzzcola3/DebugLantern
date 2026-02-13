@@ -1,0 +1,40 @@
+###############################################################################
+# DebugLantern – Bazel configuration
+###############################################################################
+
+# ── Hermetic CC toolchain ───────────────────────────────────────────────────
+# Required for zig-cc cache (sandbox mount).
+common --enable_platform_specific_config
+build:linux --sandbox_add_mount_pair=/tmp
+build:macos --sandbox_add_mount_pair=/var/tmp
+
+# For native (host) builds, Bazel auto-detects the system C++ toolchain.
+# Cross-compilation configs below select the hermetic zig toolchain explicitly.
+
+# ── Cross-compilation configs ───────────────────────────────────────────────
+# Usage:  bazel build --config=<target> //:debuglanternd
+#
+#   amd64_musl  – x86-64 Linux, statically linked (musl)
+#   amd64_gnu   – x86-64 Linux, dynamically linked (glibc 2.28+)
+#   arm64_musl  – AArch64 Linux, statically linked (musl)
+#   arm64_gnu   – AArch64 Linux, dynamically linked (glibc 2.28+)
+
+build:amd64_musl --platforms @zig_sdk//platform:linux_amd64
+build:amd64_musl --extra_toolchains @zig_sdk//toolchain:linux_amd64_musl
+build:amd64_musl --copt=-include --copt=sys/file.h
+
+build:amd64_gnu --platforms @zig_sdk//platform:linux_amd64
+build:amd64_gnu --extra_toolchains @zig_sdk//toolchain:linux_amd64_gnu.2.28
+
+build:arm64_musl --platforms @zig_sdk//platform:linux_arm64
+build:arm64_musl --extra_toolchains @zig_sdk//toolchain:linux_arm64_musl
+build:arm64_musl --copt=-include --copt=sys/file.h
+
+build:arm64_gnu --platforms @zig_sdk//platform:linux_arm64
+build:arm64_gnu --extra_toolchains @zig_sdk//toolchain:linux_arm64_gnu.2.28
+
+# ── C++ standard ────────────────────────────────────────────────────────────
+build --cxxopt=-std=c++20
+build --host_cxxopt=-std=c++20
+build --copt=-D_GNU_SOURCE
+build --host_copt=-D_GNU_SOURCE
