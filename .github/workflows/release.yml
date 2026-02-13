@@ -1,0 +1,103 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  BAZEL_VERSION: "9.0.0"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - config: ""
+            artifact: debuglantern-linux-amd64-gnu
+            label: "Linux amd64 (native)"
+          - config: "--config=amd64_musl"
+            artifact: debuglantern-linux-amd64-musl
+            label: "Linux amd64 (musl static)"
+          - config: "--config=arm64_gnu"
+            artifact: debuglantern-linux-arm64-gnu
+            label: "Linux arm64 (glibc)"
+          - config: "--config=arm64_musl"
+            artifact: debuglantern-linux-arm64-musl
+            label: "Linux arm64 (musl static)"
+
+    name: Build ${{ matrix.label }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Mount bazel cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/bazel
+            ~/.cache/bazelisk
+          key: bazel-${{ matrix.artifact }}-${{ hashFiles('MODULE.bazel', 'BUILD', '.bazelrc', 'third_party/**') }}
+          restore-keys: |
+            bazel-${{ matrix.artifact }}-
+
+      - name: Setup Bazelisk
+        uses: bazel-contrib/setup-bazel@0.14.0
+        with:
+          bazelisk-version: "1.25.0"
+
+      - name: Build debuglanternd
+        run: bazel build ${{ matrix.config }} //:debuglanternd
+
+      - name: Build debuglanternctl
+        run: bazel build ${{ matrix.config }} //:debuglanternctl
+
+      - name: Package artifacts
+        run: |
+          mkdir -p dist
+          cp bazel-bin/debuglanternd  dist/debuglanternd
+          cp bazel-bin/debuglanternctl dist/debuglanternctl
+          chmod +x dist/*
+          cd dist
+          tar czf ../${{ matrix.artifact }}.tar.gz debuglanternd debuglanternctl
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    name: Create Release
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Compute checksums
+        run: |
+          cd artifacts
+          find . -name '*.tar.gz' -exec mv {} . \;
+          sha256sum *.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/*.tar.gz
+            artifacts/SHA256SUMS.txt
