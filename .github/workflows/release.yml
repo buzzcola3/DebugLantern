@@ -18,12 +18,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - config: ""
-            artifact: debuglantern-linux-amd64-gnu
-            label: "Linux amd64 (native)"
           - config: "--config=amd64_musl"
             artifact: debuglantern-linux-amd64-musl
             label: "Linux amd64 (musl static)"
+          - config: "--config=amd64_gnu"
+            artifact: debuglantern-linux-amd64-gnu
+            label: "Linux amd64 (glibc)"
           - config: "--config=arm64_gnu"
             artifact: debuglantern-linux-arm64-gnu
             label: "Linux arm64 (glibc)"
