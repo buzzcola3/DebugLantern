@@ -1,0 +1,17 @@
+[Unit]
+Description=debuglantern daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/debuglanternd --port 4444 --service-name debuglantern
+Restart=on-failure
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
