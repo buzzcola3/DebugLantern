@@ -28,9 +28,12 @@ Single-threaded `epoll` loop. All sockets non-blocking. `pidfd` integrated into 
 ```c
 struct session {
     uuid_t  id;
-    int     memfd;
-    pid_t   pid;          // -1 if not running
-    int     debug_port;   // -1 if not debugging
+    int     memfd;           // -1 for bundles
+    char    bundle_dir[256]; // empty for single binaries
+    char    exec_path[256];  // relative path inside bundle
+    bool    is_bundle;
+    pid_t   pid;             // -1 if not running
+    int     debug_port;      // -1 if not debugging
     enum { LOADED, RUNNING, DEBUGGING, STOPPED } state;
 };
 ```
@@ -51,13 +54,17 @@ LOADED  --START-->  RUNNING  --STOP/KILL-->  STOPPED
 
 | Operation | Action |
 |-----------|--------|
-| **upload** | `memfd_create` + write + ELF validate → state=LOADED |
-| **start** | `fork` + `fexecve(memfd)` → state=RUNNING |
+| **upload** (single binary) | `memfd_create` + write + ELF validate → state=LOADED |
+| **upload** (bundle) | write tar.gz to tmpfile, extract to tmpdir, validate exec_path is ELF → state=LOADED |
+| **start** (single binary) | `fork` + `fexecve(memfd)` → state=RUNNING |
+| **start** (bundle) | `fork` + `chdir(bundle_dir)` + `execve(exec_path)` → state=RUNNING |
 | **stop** | `kill(pid, SIGTERM)` + `waitpid` → state=STOPPED |
 | **kill** | `kill(pid, SIGKILL)` + `waitpid` → state=STOPPED |
 | **debug** | `gdbserver :PORT --attach <pid>` → state=DEBUGGING |
-| **start --debug** | `gdbserver :PORT /proc/self/fd/X` → state=DEBUGGING |
-| **delete** | ensure stopped, `close(memfd)` → free RAM |
+| **start --debug** (single) | `gdbserver :PORT /proc/self/fd/X` → state=DEBUGGING |
+| **start --debug** (bundle) | `gdbserver :PORT bundle_dir/exec_path` → state=DEBUGGING |
+| **delete** (single) | ensure stopped, `close(memfd)` → free RAM |
+| **delete** (bundle) | ensure stopped, `rm -rf bundle_dir` → free disk |
 
 ## Process Monitoring
 
@@ -67,7 +74,9 @@ Use `pidfd_open(pid, 0)` + `epoll`. When process exits, epoll triggers and sessi
 
 TCP, line-framed commands. JSON responses.
 
-Commands: `UPLOAD <size>`, `START <id>`, `STOP <id>`, `KILL <id>`, `DEBUG <id>`, `LIST`, `STATUS <id>`, `DELETE <id>`
+Commands: `UPLOAD <size> [exec_path]`, `START <id>`, `STOP <id>`, `KILL <id>`, `DEBUG <id>`, `LIST`, `STATUS <id>`, `DELETE <id>`
+
+When `exec_path` is provided, the upload is treated as a tar.gz bundle. The server extracts the archive and uses the binary at `exec_path` (relative to bundle root) for execution and debugging.
 
 ## Discovery
 

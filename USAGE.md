@@ -23,6 +23,20 @@ debuglanternctl upload my_app --target target-board.local
 { "id": "a3f2c9d1", "state": "LOADED", "size": 1048576 }
 ```
 
+## Upload Bundle
+
+Upload a tar.gz archive and specify which binary inside it to run:
+
+```sh
+debuglanternctl upload openautoflutter-arm64.tar.gz --exec-path openautoflutter/openautoflutter --target target-board.local
+```
+
+```json
+{ "id": "b7e812aa", "state": "LOADED", "size": 52428800, "bundle": true, "exec_path": "openautoflutter/openautoflutter" }
+```
+
+The archive is extracted on the device. Shared libraries, assets, and other files in the bundle are preserved alongside the binary. The working directory is set to the bundle root when the process starts.
+
 ## Start
 
 ```sh
@@ -126,6 +140,19 @@ Three independent processes; debug, stop, or kill each separately.
 
 ```sh
 ID=$(debuglanternctl upload build/output/test_binary | jq -r .id)
+debuglanternctl start "$ID"
+sleep 2
+debuglanternctl debug "$ID"
+PORT=$(debuglanternctl status "$ID" | jq -r .debug_port)
+gdb -batch -ex "target remote device:$PORT" -ex "bt"
+debuglanternctl kill "$ID"
+debuglanternctl delete "$ID"
+```
+
+## CI / Automation (Bundle)
+
+```sh
+ID=$(debuglanternctl upload build/output/my_app.tar.gz --exec-path my_app/my_app | jq -r .id)
 debuglanternctl start "$ID"
 sleep 2
 debuglanternctl debug "$ID"

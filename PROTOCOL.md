@@ -21,6 +21,10 @@ SP             := " "
 - `UPLOAD <size>`
   - Client sends a line with the byte length, then exactly `<size>` raw bytes.
   - Server validates ELF magic and stores a memfd session.
+- `UPLOAD <size> <exec_path>`
+  - Client sends a line with the byte length and relative path to the executable, then exactly `<size>` raw bytes of a tar.gz archive.
+  - Server extracts the archive to a temporary directory, validates the binary at `<exec_path>` is a valid ELF, and creates a bundle session.
+  - `<exec_path>` is relative to the archive root (e.g., `my_app/my_app` or `bin/server`).
 - `START <id> [--debug]`
 - `STOP <id>`
 - `KILL <id>`
@@ -52,6 +56,8 @@ Error responses are JSON objects with the following fields:
 
 ## Upload Framing Example
 
+Single binary:
+
 Client:
 
 ```
@@ -63,6 +69,21 @@ Server:
 
 ```
 { "id": "...", "state": "LOADED", "size": 1048576 }\n
+```
+
+Bundle:
+
+Client:
+
+```
+UPLOAD 52428800 my_app/my_app\n
+<52428800 raw bytes of tar.gz>
+```
+
+Server:
+
+```
+{ "id": "...", "state": "LOADED", "size": 52428800, "bundle": true, "exec_path": "my_app/my_app" }\n
 ```
 
 ## Notes

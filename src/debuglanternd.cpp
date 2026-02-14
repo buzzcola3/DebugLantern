@@ -12,6 +12,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <ftw.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <sys/epoll.h>
@@ -202,6 +203,9 @@ struct Session {
     int gdb_pidfd = -1;
     size_t size = 0;
     int state = 0;
+    bool is_bundle = false;
+    std::string bundle_dir;
+    std::string exec_path;
 };
 
 struct WatchInfo {
@@ -218,6 +222,10 @@ struct ClientConn {
     int upload_memfd = -1;
     size_t elf_filled = 0;
     unsigned char elf_magic[4] = {0};
+    bool is_bundle = false;
+    std::string exec_path;
+    int upload_tmpfd = -1;
+    std::string upload_tmppath;
 };
 
 struct Config {
@@ -229,6 +237,42 @@ struct Config {
     int drop_uid = -1;
     int drop_gid = -1;
 };
+
+int nftw_remove_cb(const char *fpath, const struct stat * /*sb*/, int /*typeflag*/, struct FTW * /*ftwbuf*/) {
+    return remove(fpath);
+}
+
+bool remove_directory_recursive(const std::string &path) {
+    return nftw(path.c_str(), nftw_remove_cb, 64, FTW_DEPTH | FTW_PHYS) == 0;
+}
+
+bool extract_tar_gz(const std::string &archive_path, const std::string &dest_dir) {
+    pid_t child = fork();
+    if (child == 0) {
+        execlp("tar", "tar", "xzf", archive_path.c_str(), "-C", dest_dir.c_str(), nullptr);
+        _exit(127);
+    }
+    if (child < 0) {
+        return false;
+    }
+    int status = 0;
+    waitpid(child, &status, 0);
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+bool validate_elf_file(const std::string &path) {
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd < 0) {
+        return false;
+    }
+    unsigned char magic[4] = {0};
+    ssize_t n = read(fd, magic, 4);
+    close(fd);
+    if (n < 4) {
+        return false;
+    }
+    return magic[0] == 0x7f && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F';
+}
 
 class Server {
 public:
@@ -348,6 +392,12 @@ private:
         if (conn.in_upload && conn.upload_memfd >= 0) {
             close(conn.upload_memfd);
         }
+        if (conn.in_upload && conn.upload_tmpfd >= 0) {
+            close(conn.upload_tmpfd);
+            if (!conn.upload_tmppath.empty()) {
+                unlink(conn.upload_tmppath.c_str());
+            }
+        }
         clients_.erase(conn.fd);
     }
 
@@ -421,7 +471,7 @@ private:
     }
 
     bool write_upload_chunk(ClientConn &conn, const char *data, size_t len) {
-        if (conn.elf_filled < 4) {
+        if (!conn.is_bundle && conn.elf_filled < 4) {
             size_t want = std::min(len, static_cast<size_t>(4 - conn.elf_filled));
             for (size_t i = 0; i < want; ++i) {
                 conn.elf_magic[conn.elf_filled + i] = static_cast<unsigned char>(data[i]);
@@ -429,9 +479,10 @@ private:
             conn.elf_filled += want;
         }
 
+        int write_fd = conn.is_bundle ? conn.upload_tmpfd : conn.upload_memfd;
         size_t off = 0;
         while (off < len) {
-            ssize_t wrote = write(conn.upload_memfd, data + off, len - off);
+            ssize_t wrote = write(write_fd, data + off, len - off);
             if (wrote <= 0) {
                 return false;
             }
@@ -442,6 +493,10 @@ private:
 
     bool finish_upload(ClientConn &conn) {
         conn.in_upload = false;
+
+        if (conn.is_bundle) {
+            return finish_bundle_upload(conn);
+        }
 
         if (conn.elf_filled < 4 || conn.elf_magic[0] != 0x7f || conn.elf_magic[1] != 'E' ||
             conn.elf_magic[2] != 'L' || conn.elf_magic[3] != 'F') {
@@ -487,6 +542,82 @@ private:
         return true;
     }
 
+    bool finish_bundle_upload(ClientConn &conn) {
+        close(conn.upload_tmpfd);
+        conn.upload_tmpfd = -1;
+
+        if (sessions_.size() >= cfg_.max_sessions) {
+            send_error(conn.fd, "max_sessions_reached");
+            unlink(conn.upload_tmppath.c_str());
+            return true;
+        }
+
+        if (total_bytes_ + conn.upload_size > cfg_.max_total_bytes) {
+            send_error(conn.fd, "max_total_bytes_reached");
+            unlink(conn.upload_tmppath.c_str());
+            return true;
+        }
+
+        // Create extraction directory
+        char tmpdir[] = "/tmp/debuglantern-bundle-XXXXXX";
+        if (!mkdtemp(tmpdir)) {
+            send_error(conn.fd, "tmpdir_create_failed");
+            unlink(conn.upload_tmppath.c_str());
+            return true;
+        }
+        std::string bundle_dir = tmpdir;
+
+        // Extract tar.gz
+        if (!extract_tar_gz(conn.upload_tmppath, bundle_dir)) {
+            send_error(conn.fd, "extract_failed");
+            unlink(conn.upload_tmppath.c_str());
+            remove_directory_recursive(bundle_dir);
+            return true;
+        }
+
+        // Remove the temp archive
+        unlink(conn.upload_tmppath.c_str());
+
+        // Validate the exec_path binary exists and is ELF
+        std::string full_exec = bundle_dir + "/" + conn.exec_path;
+        if (!validate_elf_file(full_exec)) {
+            send_error(conn.fd, "invalid_exec_path");
+            remove_directory_recursive(bundle_dir);
+            return true;
+        }
+
+        // Make executable
+        chmod(full_exec.c_str(), 0755);
+
+        std::string id = generate_uuid();
+        Session s;
+        s.id = id;
+        s.memfd = -1;
+        s.size = conn.upload_size;
+        s.state = 0;
+        s.is_bundle = true;
+        s.bundle_dir = bundle_dir;
+        s.exec_path = conn.exec_path;
+
+        sessions_[id] = s;
+        total_bytes_ += conn.upload_size;
+
+        std::ostringstream oss;
+        oss << "{" << debuglantern::json_kv("id", id, true) << ","
+            << debuglantern::json_kv("state", state_to_string(s.state), true) << ","
+            << debuglantern::json_kv("size", static_cast<long long>(s.size)) << ","
+            << debuglantern::json_kv("bundle", true) << ","
+            << debuglantern::json_kv("exec_path", s.exec_path, true) << "}\n";
+        send_response(conn.fd, oss.str());
+
+        conn.upload_tmppath.clear();
+        conn.upload_size = 0;
+        conn.is_bundle = false;
+        conn.exec_path.clear();
+        conn.elf_filled = 0;
+        return true;
+    }
+
     std::optional<std::string> read_line(std::string &buf) {
         size_t pos = buf.find('\n');
         if (pos == std::string::npos) {
@@ -516,17 +647,51 @@ private:
                 return;
             }
 
-            int memfd = memfd_create_sys("debuglantern", MFD_CLOEXEC);
-            if (memfd < 0) {
-                send_error(conn.fd, "memfd_create_failed");
-                return;
-            }
+            std::string exec_path;
+            iss >> exec_path;
+            bool is_bundle = !exec_path.empty();
 
-            conn.in_upload = true;
-            conn.upload_remaining = size;
-            conn.upload_size = size;
-            conn.upload_memfd = memfd;
-            conn.elf_filled = 0;
+            if (is_bundle) {
+                // Validate exec_path doesn't escape the bundle
+                if (exec_path.find("..") != std::string::npos) {
+                    send_error(conn.fd, "invalid_exec_path");
+                    return;
+                }
+
+                // Create temp file for tar.gz
+                char tmppath[] = "/tmp/debuglantern-upload-XXXXXX";
+                int tmpfd = mkstemp(tmppath);
+                if (tmpfd < 0) {
+                    send_error(conn.fd, "tmpfile_create_failed");
+                    return;
+                }
+
+                conn.in_upload = true;
+                conn.upload_remaining = size;
+                conn.upload_size = size;
+                conn.is_bundle = true;
+                conn.exec_path = exec_path;
+                conn.upload_tmpfd = tmpfd;
+                conn.upload_tmppath = tmppath;
+                conn.upload_memfd = -1;
+                conn.elf_filled = 0;
+            } else {
+                int memfd = memfd_create_sys("debuglantern", MFD_CLOEXEC);
+                if (memfd < 0) {
+                    send_error(conn.fd, "memfd_create_failed");
+                    return;
+                }
+
+                conn.in_upload = true;
+                conn.upload_remaining = size;
+                conn.upload_size = size;
+                conn.upload_memfd = memfd;
+                conn.is_bundle = false;
+                conn.exec_path.clear();
+                conn.upload_tmpfd = -1;
+                conn.upload_tmppath.clear();
+                conn.elf_filled = 0;
+            }
             return;
         }
 
@@ -600,6 +765,11 @@ private:
             return;
         }
 
+        if (s.is_bundle) {
+            handle_start_bundle(fd, s, debug);
+            return;
+        }
+
         if (debug) {
             int port = alloc_debug_port();
             pid_t child = fork();
@@ -631,6 +801,57 @@ private:
             std::string path = "/proc/self/fd/" + std::to_string(s.memfd);
             argv[0] = const_cast<char *>(path.c_str());
             fexecve(s.memfd, argv, environ);
+            _exit(127);
+        }
+
+        if (child < 0) {
+            send_error(fd, "fork_failed");
+            return;
+        }
+
+        s.pid = child;
+        s.state = 1;
+        add_watch(child, s.id, false);
+        send_status(fd, s.id);
+    }
+
+    void handle_start_bundle(int fd, Session &s, bool debug) {
+        std::string full_exec = s.bundle_dir + "/" + s.exec_path;
+
+        if (debug) {
+            int port = alloc_debug_port();
+            pid_t child = fork();
+            if (child == 0) {
+                prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
+                if (chdir(s.bundle_dir.c_str()) != 0) {
+                    _exit(127);
+                }
+                std::string port_arg = ":" + std::to_string(port);
+                execlp("gdbserver", "gdbserver", port_arg.c_str(), full_exec.c_str(), nullptr);
+                _exit(127);
+            }
+            if (child < 0) {
+                send_error(fd, "fork_failed");
+                return;
+            }
+
+            s.pid = child;
+            s.gdb_pid = child;
+            s.debug_port = port;
+            s.state = 2;
+            add_watch(child, s.id, true);
+            send_status(fd, s.id);
+            return;
+        }
+
+        pid_t child = fork();
+        if (child == 0) {
+            prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
+            if (chdir(s.bundle_dir.c_str()) != 0) {
+                _exit(127);
+            }
+            char *argv[] = {const_cast<char *>(full_exec.c_str()), nullptr};
+            execve(full_exec.c_str(), argv, environ);
             _exit(127);
         }
 
@@ -717,6 +938,9 @@ private:
             close(s.memfd);
             s.memfd = -1;
         }
+        if (s.is_bundle && !s.bundle_dir.empty()) {
+            remove_directory_recursive(s.bundle_dir);
+        }
         total_bytes_ -= s.size;
         sessions_.erase(it);
 
@@ -767,6 +991,10 @@ private:
         } else {
             oss << debuglantern::json_kv("debug_port", "null", false);
         }
+        if (s.is_bundle) {
+            oss << "," << debuglantern::json_kv("bundle", true);
+            oss << "," << debuglantern::json_kv("exec_path", s.exec_path, true);
+        }
         oss << "}";
         return oss.str();
     }
@@ -786,6 +1014,10 @@ private:
         if (code == "kill_failed") return "failed to signal process";
         if (code == "session_running") return "session must be stopped before delete";
         if (code == "unknown_command") return "unknown command";
+        if (code == "invalid_exec_path") return "exec_path not found or not a valid ELF in bundle";
+        if (code == "tmpfile_create_failed") return "failed to create temporary file";
+        if (code == "tmpdir_create_failed") return "failed to create temporary directory";
+        if (code == "extract_failed") return "failed to extract tar.gz bundle";
         return "unspecified error";
     }
 

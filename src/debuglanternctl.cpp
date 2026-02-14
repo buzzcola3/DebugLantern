@@ -24,8 +24,10 @@ struct Target {
 
 void usage() {
     std::cout << "debuglanternctl <cmd> [args] --target host --port 4444\n"
-                 "commands: upload <file>, start <id> [--debug], stop <id>, kill <id>, "
-                 "debug <id>, list, status <id>, delete <id>\n";
+                 "commands: upload <file> [--exec-path <path>], start <id> [--debug], stop <id>,\n"
+                 "          kill <id>, debug <id>, list, status <id>, delete <id>\n"
+                 "\n"
+                 "  --exec-path  path to binary inside a tar.gz bundle (triggers bundle upload)\n";
 }
 
 Target parse_target(int &argc, char **argv) {
@@ -156,17 +158,34 @@ int main(int argc, char **argv) {
             usage();
             return 1;
         }
+        std::string filepath = argv[2];
+        std::string exec_path;
+
+        // Parse --exec-path from remaining args
+        for (int i = 3; i < argc; ++i) {
+            std::string arg = argv[i];
+            if (arg == "--exec-path" && i + 1 < argc) {
+                exec_path = argv[++i];
+            }
+        }
+
         size_t size = 0;
         struct stat st{};
-        if (stat(argv[2], &st) != 0) {
+        if (stat(filepath.c_str(), &st) != 0) {
             perror("stat");
             return 1;
         }
         size = static_cast<size_t>(st.st_size);
-        if (!send_line(fd, "UPLOAD " + std::to_string(size))) {
+
+        std::string upload_cmd = "UPLOAD " + std::to_string(size);
+        if (!exec_path.empty()) {
+            upload_cmd += " " + exec_path;
+        }
+
+        if (!send_line(fd, upload_cmd)) {
             return 1;
         }
-        if (!send_file(fd, argv[2])) {
+        if (!send_file(fd, filepath)) {
             std::cerr << "upload failed\n";
             return 1;
         }
