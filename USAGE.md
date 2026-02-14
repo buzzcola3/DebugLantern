@@ -169,3 +169,24 @@ build locally  →  upload  →  start  →  attach gdb  →  fix bug  →  re-u
 ```
 
 No SSH. No SCP. No filesystem pollution. Everything ephemeral.
+
+## Check System Dependencies
+
+Verify the target device has all required tools installed:
+
+```sh
+debuglanternctl deps --target target-board.local
+```
+
+```json
+{
+  "deps": [
+    { "name": "gdbserver", "description": "Required for debug attach and start --debug", "available": true, "required": true },
+    { "name": "tar", "description": "Required for bundle (tar.gz) extraction", "available": true, "required": true },
+    { "name": "gzip", "description": "Required for bundle (tar.gz) decompression", "available": true, "required": true }
+  ],
+  "all_satisfied": true
+}
+```
+
+The web UI dashboard also shows dependency status — click the gear icon in the status bar.

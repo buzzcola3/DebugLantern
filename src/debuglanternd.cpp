@@ -260,6 +260,47 @@ bool extract_tar_gz(const std::string &archive_path, const std::string &dest_dir
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
+struct DepStatus {
+    std::string name;
+    std::string description;
+    bool available;
+    bool required;
+};
+
+std::vector<DepStatus> check_dependencies() {
+    std::vector<DepStatus> deps;
+
+    auto check_cmd = [](const char *name) -> bool {
+        std::string cmd = "command -v ";
+        cmd += name;
+        cmd += " >/dev/null 2>&1";
+        return system(cmd.c_str()) == 0;
+    };
+
+    deps.push_back({"gdbserver", "Required for debug attach and start --debug", check_cmd("gdbserver"), true});
+    deps.push_back({"tar", "Required for bundle (tar.gz) extraction", check_cmd("tar"), true});
+    deps.push_back({"gzip", "Required for bundle (tar.gz) decompression", check_cmd("gzip"), true});
+
+    return deps;
+}
+
+std::string deps_json() {
+    auto deps = check_dependencies();
+    bool all_ok = true;
+    std::ostringstream oss;
+    oss << "{\"deps\":[";
+    for (size_t i = 0; i < deps.size(); ++i) {
+        if (i > 0) oss << ",";
+        oss << "{" << debuglantern::json_kv("name", deps[i].name, true) << ","
+            << debuglantern::json_kv("description", deps[i].description, true) << ","
+            << debuglantern::json_kv("available", deps[i].available) << ","
+            << debuglantern::json_kv("required", deps[i].required) << "}";
+        if (deps[i].required && !deps[i].available) all_ok = false;
+    }
+    oss << "]," << debuglantern::json_kv("all_satisfied", all_ok) << "}";
+    return oss.str();
+}
+
 bool validate_elf_file(const std::string &path) {
     int fd = open(path.c_str(), O_RDONLY);
     if (fd < 0) {
@@ -697,6 +738,13 @@ private:
 
         if (cmd == "LIST") {
             send_list(conn.fd);
+            return;
+        }
+
+        if (cmd == "DEPS") {
+            std::string json = deps_json();
+            json += "\n";
+            send_response(conn.fd, json);
             return;
         }
 

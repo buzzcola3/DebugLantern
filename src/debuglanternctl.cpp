@@ -25,7 +25,7 @@ struct Target {
 void usage() {
     std::cout << "debuglanternctl <cmd> [args] --target host --port 4444\n"
                  "commands: upload <file> [--exec-path <path>], start <id> [--debug], stop <id>,\n"
-                 "          kill <id>, debug <id>, list, status <id>, delete <id>\n"
+                 "          kill <id>, debug <id>, list, status <id>, delete <id>, deps\n"
                  "\n"
                  "  --exec-path  path to binary inside a tar.gz bundle (triggers bundle upload)\n";
 }

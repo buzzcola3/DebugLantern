@@ -70,6 +70,11 @@ th{color:var(--gray);font-size:.75rem;text-transform:uppercase;letter-spacing:1p
   <div class="status-bar">
     <span><span class="dot" id="conn-dot"></span><span id="conn-text">connected</span></span>
     <span id="session-count">0 sessions</span>
+    <span id="deps-status" style="margin-left:auto;cursor:pointer" onclick="toggleDeps()">&#x2699; deps</span>
+  </div>
+  <div id="deps-panel" style="display:none;margin-bottom:24px;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px">
+    <h3 style="font-size:.85rem;color:var(--gray);margin-bottom:12px">System Dependencies</h3>
+    <div id="deps-list"></div>
   </div>
   <div class="upload-zone" id="upload-zone" onclick="document.getElementById('file-input').click()">
     <input type="file" id="file-input">
@@ -176,6 +181,38 @@ const zone=$('upload-zone');
 zone.addEventListener('dragover',e=>{e.preventDefault();zone.classList.add('dragover');});
 zone.addEventListener('dragleave',()=>zone.classList.remove('dragover'));
 zone.addEventListener('drop',e=>{e.preventDefault();zone.classList.remove('dragover');if(e.dataTransfer.files.length)upload(e.dataTransfer.files[0]);});
+
+function toggleDeps(){
+  const p=$('deps-panel');
+  p.style.display=p.style.display==='none'?'block':'none';
+  if(p.style.display==='block')checkDeps();
+}
+
+async function checkDeps(){
+  try{
+    const r=await fetch('/api/deps');
+    const d=await r.json();
+    renderDeps(d);
+  }catch(e){$('deps-list').innerHTML='<span style=\"color:var(--accent)\">Failed to check</span>';}
+}
+
+function renderDeps(d){
+  const ds=$('deps-status');
+  if(d.all_satisfied){ds.innerHTML='&#x2699; deps &#x2705;';}
+  else{ds.innerHTML='&#x2699; deps &#x274C;';}
+  $('deps-list').innerHTML=d.deps.map(dep=>{
+    const icon=dep.available?'&#x2705;':'&#x274C;';
+    const color=dep.available?'var(--green)':'var(--accent)';
+    return '<div style=\"display:flex;align-items:center;gap:8px;padding:4px 0;font-size:.8rem\">'+
+      '<span>'+icon+'</span>'+
+      '<span style=\"color:'+color+';font-weight:600;min-width:90px\">'+dep.name+'</span>'+
+      '<span style=\"color:var(--gray)\">'+dep.description+'</span>'+
+      '<span style=\"margin-left:auto;color:'+(dep.available?'var(--green)':'var(--accent)')+'\">'+
+      (dep.available?'found':'missing')+'</span></div>';
+  }).join('');
+}
+
+checkDeps();
 
 let evtSrc;
 function connectSSE(){
@@ -404,7 +441,13 @@ void WebUI::handle_client(int fd) {
         send_http(fd, 200, "application/json", resp);
         return;
     }
-
+    // GET /api/deps
+    if (req.method == "GET" && parts.size() == 2 &&
+        parts[0] == "api" && parts[1] == "deps") {
+        auto resp = proxy("DEPS");
+        send_http(fd, 200, "application/json", resp);
+        return;
+    }
     // GET /api/events (SSE)
     if (req.method == "GET" && parts.size() == 2 &&
         parts[0] == "api" && parts[1] == "events") {

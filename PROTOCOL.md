@@ -32,6 +32,9 @@ SP             := " "
 - `LIST`
 - `STATUS <id>`
 - `DELETE <id>`
+- `DEPS`
+  - Returns a JSON object listing required system dependencies and whether each is available on the host.
+  - No arguments.
 
 ## Responses
 

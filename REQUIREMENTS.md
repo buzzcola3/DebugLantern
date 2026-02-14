@@ -74,9 +74,21 @@ Use `pidfd_open(pid, 0)` + `epoll`. When process exits, epoll triggers and sessi
 
 TCP, line-framed commands. JSON responses.
 
-Commands: `UPLOAD <size> [exec_path]`, `START <id>`, `STOP <id>`, `KILL <id>`, `DEBUG <id>`, `LIST`, `STATUS <id>`, `DELETE <id>`
+Commands: `UPLOAD <size> [exec_path]`, `START <id>`, `STOP <id>`, `KILL <id>`, `DEBUG <id>`, `LIST`, `STATUS <id>`, `DELETE <id>`, `DEPS`
 
 When `exec_path` is provided, the upload is treated as a tar.gz bundle. The server extracts the archive and uses the binary at `exec_path` (relative to bundle root) for execution and debugging.
+
+## System Dependencies
+
+The daemon checks for the following system packages at runtime:
+
+| Dependency | Purpose | Required |
+|------------|---------|----------|
+| `gdbserver` | Debug attach and `start --debug` | Yes |
+| `tar` | Bundle (tar.gz) extraction | Yes |
+| `gzip` | Bundle (tar.gz) decompression | Yes |
+
+Use the `DEPS` command (or `debuglanternctl deps`) to check availability. The web UI also displays dependency status.
 
 ## Discovery
 
