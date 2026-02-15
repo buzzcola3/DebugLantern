@@ -1242,13 +1242,64 @@ private:
             return;
         }
 
+        // Kill the entire process group first, then the leader.
+        // Group kill may already terminate the leader, so ignore
+        // errors on the individual kill.
         kill(-s.pid, sig);
-        if (kill(s.pid, sig) < 0) {
-            send_error(fd, "kill_failed");
-            return;
+        kill(s.pid, sig);
+
+        // For SIGKILL, try to reap immediately so the state
+        // transitions even if the pidfd watch hasn't fired yet
+        // (e.g. process stuck in D state / DRM uninterruptible sleep).
+        if (sig == SIGKILL) {
+            force_reap(s);
         }
 
         send_status(fd, s.id);
+    }
+
+    // Attempt to reap the process immediately and update session state.
+    // Handles both plain and debug (gdbserver-wrapped) sessions.
+    void force_reap(Session &s) {
+        // Try to reap the main pid
+        if (s.pid > 0) {
+            int status = 0;
+            pid_t w = waitpid(s.pid, &status, WNOHANG);
+            if (w > 0 || (w < 0 && errno == ECHILD)) {
+                // Process is dead or not our child; clean up state
+                if (s.pidfd >= 0) {
+                    cleanup_watch(s.pidfd);
+                    s.pidfd = -1;
+                }
+                if (s.gdb_pidfd >= 0 && s.gdb_pidfd != s.pidfd) {
+                    cleanup_watch(s.gdb_pidfd);
+                    s.gdb_pidfd = -1;
+                }
+                close_output_pipe(s);
+                s.pid = -1;
+                s.gdb_pid = -1;
+                s.debug_port = -1;
+                s.state = 3;
+                return;
+            }
+        }
+
+        // If gdbserver is a separate process, try reaping it too
+        if (s.gdb_pid > 0 && s.gdb_pid != s.pid) {
+            int status = 0;
+            pid_t w = waitpid(s.gdb_pid, &status, WNOHANG);
+            if (w > 0 || (w < 0 && errno == ECHILD)) {
+                if (s.gdb_pidfd >= 0) {
+                    cleanup_watch(s.gdb_pidfd);
+                    s.gdb_pidfd = -1;
+                }
+                s.gdb_pid = -1;
+                s.debug_port = -1;
+                if (s.state == 2) {
+                    s.state = (s.pid > 0) ? 1 : 3;
+                }
+            }
+        }
     }
 
     void handle_debug(int fd, const std::string &id) {
