@@ -995,6 +995,7 @@ private:
             int port = alloc_debug_port();
             pid_t child = fork();
             if (child == 0) {
+                setpgid(0, 0);
                 close(pipefd[0]);
                 dup2(pipefd[1], STDOUT_FILENO);
                 dup2(pipefd[1], STDERR_FILENO);
@@ -1020,6 +1021,7 @@ private:
                 return;
             }
 
+            setpgid(child, child);
             close(pipefd[1]);
             s.pid = child;
             s.gdb_pid = child;
@@ -1033,6 +1035,7 @@ private:
 
         pid_t child = fork();
         if (child == 0) {
+            setpgid(0, 0);
             close(pipefd[0]);
             dup2(pipefd[1], STDOUT_FILENO);
             dup2(pipefd[1], STDERR_FILENO);
@@ -1056,6 +1059,7 @@ private:
             return;
         }
 
+        setpgid(child, child);
         close(pipefd[1]);
         s.pid = child;
         s.state = 1;
@@ -1079,6 +1083,7 @@ private:
             int port = alloc_debug_port();
             pid_t child = fork();
             if (child == 0) {
+                setpgid(0, 0);
                 close(pipefd[0]);
                 dup2(pipefd[1], STDOUT_FILENO);
                 dup2(pipefd[1], STDERR_FILENO);
@@ -1106,6 +1111,7 @@ private:
                 return;
             }
 
+            setpgid(child, child);
             close(pipefd[1]);
             s.pid = child;
             s.gdb_pid = child;
@@ -1119,6 +1125,7 @@ private:
 
         pid_t child = fork();
         if (child == 0) {
+            setpgid(0, 0);
             close(pipefd[0]);
             dup2(pipefd[1], STDOUT_FILENO);
             dup2(pipefd[1], STDERR_FILENO);
@@ -1144,6 +1151,7 @@ private:
             return;
         }
 
+        setpgid(child, child);
         close(pipefd[1]);
         s.pid = child;
         s.state = 1;
@@ -1234,6 +1242,7 @@ private:
             return;
         }
 
+        kill(-s.pid, sig);
         if (kill(s.pid, sig) < 0) {
             send_error(fd, "kill_failed");
             return;
@@ -1350,6 +1359,7 @@ private:
         if (s.is_bundle) {
             oss << "," << debuglantern::json_kv("bundle", true);
             oss << "," << debuglantern::json_kv("exec_path", s.exec_path, true);
+            oss << "," << debuglantern::json_kv("bundle_dir", s.bundle_dir, true);
         }
         if (!s.saved_args.empty()) {
             oss << "," << debuglantern::json_kv("args", s.saved_args, true);
@@ -1453,6 +1463,9 @@ private:
         }
 
         if (watch.is_gdb) {
+            if (gdb_is_app && pid > 0) {
+                kill(-pid, SIGKILL);
+            }
             s.gdb_pid = -1;
             s.debug_port = -1;
             if (s.state == 2) {
