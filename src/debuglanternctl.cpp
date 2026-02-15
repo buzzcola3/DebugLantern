@@ -24,10 +24,18 @@ struct Target {
 
 void usage() {
     std::cout << "debuglanternctl <cmd> [args] --target host --port 4444\n"
-                 "commands: upload <file> [--exec-path <path>], start <id> [--debug], stop <id>,\n"
-                 "          kill <id>, debug <id>, list, status <id>, delete <id>, deps\n"
+                 "commands: upload <file> [--exec-path <path>],\n"
+                 "          args <id> \"arg1 arg2 ...\", start <id> [--debug],\n"
+                 "          env <id> KEY=VALUE, envdel <id> KEY, envlist <id>,\n"
+                 "          stop <id>, kill <id>, debug <id>, list, status <id>, delete <id>,\n"
+                 "          output <id> [--follow], deps\n"
                  "\n"
-                 "  --exec-path  path to binary inside a tar.gz bundle (triggers bundle upload)\n";
+                 "  --exec-path       path to binary inside a tar.gz bundle (triggers bundle upload)\n"
+                 "  args <id> \"...\"  set arguments for a session (saved, used on every start)\n"
+                 "  env <id> K=V      set an environment variable for a session\n"
+                 "  envdel <id> KEY   remove an environment variable\n"
+                 "  envlist <id>      list environment variables for a session\n"
+                 "  --follow          continuously stream output (for output command)\n";
 }
 
 Target parse_target(int &argc, char **argv) {
@@ -188,6 +196,117 @@ int main(int argc, char **argv) {
         if (!send_file(fd, filepath)) {
             std::cerr << "upload failed\n";
             return 1;
+        }
+    } else if (cmd == "output") {
+        if (argc < 3) {
+            usage();
+            return 1;
+        }
+        std::string id = argv[2];
+        bool follow = false;
+        for (int i = 3; i < argc; ++i) {
+            if (std::string(argv[i]) == "--follow") {
+                follow = true;
+            }
+        }
+
+        if (!follow) {
+            if (!send_line(fd, "OUTPUT " + id)) {
+                std::cerr << "send failed\n";
+                return 1;
+            }
+            std::string resp;
+            if (!read_all(fd, resp)) {
+                std::cerr << "read failed\n";
+                return 1;
+            }
+            // Parse and print just the output content
+            auto ostart = resp.find("\"output\":\"");
+            if (ostart != std::string::npos) {
+                ostart += 10;
+                auto oend = resp.find("\"", ostart);
+                if (oend != std::string::npos) {
+                    std::string out = resp.substr(ostart, oend - ostart);
+                    // Unescape JSON string
+                    std::string decoded;
+                    for (size_t i = 0; i < out.size(); ++i) {
+                        if (out[i] == '\\' && i + 1 < out.size()) {
+                            char c = out[i + 1];
+                            if (c == 'n') { decoded += '\n'; ++i; }
+                            else if (c == 'r') { decoded += '\r'; ++i; }
+                            else if (c == 't') { decoded += '\t'; ++i; }
+                            else if (c == '\\') { decoded += '\\'; ++i; }
+                            else if (c == '"') { decoded += '"'; ++i; }
+                            else { decoded += out[i]; }
+                        } else {
+                            decoded += out[i];
+                        }
+                    }
+                    std::cout << decoded;
+                }
+            }
+            close(fd);
+            return 0;
+        }
+
+        // Follow mode: poll output with offset
+        size_t offset = 0;
+        while (true) {
+            int cfd = connect_to(target);
+            if (cfd < 0) {
+                usleep(500000);
+                continue;
+            }
+            if (!send_line(cfd, "OUTPUT " + id + " " + std::to_string(offset))) {
+                close(cfd);
+                usleep(500000);
+                continue;
+            }
+            std::string resp;
+            if (!read_all(cfd, resp)) {
+                close(cfd);
+                usleep(500000);
+                continue;
+            }
+            close(cfd);
+
+            // Parse total from response
+            auto tstart = resp.find("\"total\":");
+            size_t total = offset;
+            if (tstart != std::string::npos) {
+                tstart += 8;
+                total = std::stoull(resp.substr(tstart));
+            }
+
+            // Parse and print output
+            auto ostart = resp.find("\"output\":\"");
+            if (ostart != std::string::npos) {
+                ostart += 10;
+                auto oend = resp.find("\"", ostart);
+                if (oend != std::string::npos) {
+                    std::string out = resp.substr(ostart, oend - ostart);
+                    std::string decoded;
+                    for (size_t i = 0; i < out.size(); ++i) {
+                        if (out[i] == '\\' && i + 1 < out.size()) {
+                            char c = out[i + 1];
+                            if (c == 'n') { decoded += '\n'; ++i; }
+                            else if (c == 'r') { decoded += '\r'; ++i; }
+                            else if (c == 't') { decoded += '\t'; ++i; }
+                            else if (c == '\\') { decoded += '\\'; ++i; }
+                            else if (c == '"') { decoded += '"'; ++i; }
+                            else { decoded += out[i]; }
+                        } else {
+                            decoded += out[i];
+                        }
+                    }
+                    if (!decoded.empty()) {
+                        std::cout << decoded << std::flush;
+                    }
+                }
+            }
+
+            offset = total;
+            usleep(500000);
         }
     } else {
         std::ostringstream oss;

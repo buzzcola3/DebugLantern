@@ -29,6 +29,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -44,6 +45,7 @@ constexpr int kDefaultPort = 4444;
 constexpr int kMaxEvents = 64;
 constexpr int kDefaultDebugPortBase = 5500;
 constexpr int kDebugPortRange = 200;
+constexpr size_t kMaxOutputBuffer = 256 * 1024;
 constexpr const char *kServiceType = "_mydebug._tcp";
 
 int pidfd_open_sys(pid_t pid) {
@@ -206,6 +208,14 @@ struct Session {
     bool is_bundle = false;
     std::string bundle_dir;
     std::string exec_path;
+    std::string output;
+    int output_pipe_fd = -1;
+    std::string saved_args;
+    std::map<std::string, std::string> env_vars;
+};
+
+struct OutputPipeInfo {
+    std::string session_id;
 };
 
 struct WatchInfo {
@@ -384,6 +394,12 @@ public:
                 auto watch_it = watches_.find(fd);
                 if (watch_it != watches_.end()) {
                     handle_watch(fd, watch_it->second);
+                    continue;
+                }
+
+                auto pipe_it = output_pipes_.find(fd);
+                if (pipe_it != output_pipes_.end()) {
+                    handle_output_pipe(fd, pipe_it->second);
                     continue;
                 }
 
@@ -748,6 +764,18 @@ private:
             return;
         }
 
+        if (cmd == "OUTPUT") {
+            std::string id;
+            iss >> id;
+            size_t offset = 0;
+            std::string off_str;
+            if (iss >> off_str) {
+                offset = std::stoull(off_str);
+            }
+            handle_output(conn.fd, id, offset);
+            return;
+        }
+
         if (cmd == "STATUS") {
             std::string id;
             iss >> id;
@@ -755,13 +783,48 @@ private:
             return;
         }
 
+        if (cmd == "ARGS") {
+            std::string id;
+            iss >> id;
+            std::string rest;
+            std::getline(iss, rest);
+            // Trim leading space
+            if (!rest.empty() && rest[0] == ' ') rest.erase(0, 1);
+            handle_set_args(conn.fd, id, rest);
+            return;
+        }
+
+        if (cmd == "ENV") {
+            std::string id;
+            iss >> id;
+            std::string rest;
+            std::getline(iss, rest);
+            if (!rest.empty() && rest[0] == ' ') rest.erase(0, 1);
+            handle_set_env(conn.fd, id, rest);
+            return;
+        }
+
+        if (cmd == "ENVDEL") {
+            std::string id, key;
+            iss >> id >> key;
+            handle_del_env(conn.fd, id, key);
+            return;
+        }
+
+        if (cmd == "ENVLIST") {
+            std::string id;
+            iss >> id;
+            handle_list_env(conn.fd, id);
+            return;
+        }
+
         if (cmd == "START") {
             std::string id;
             iss >> id;
             bool debug = false;
-            std::string flag;
-            while (iss >> flag) {
-                if (flag == "--debug") {
+            std::string token;
+            while (iss >> token) {
+                if (token == "--debug") {
                     debug = true;
                 }
             }
@@ -800,6 +863,103 @@ private:
         send_error(conn.fd, "unknown_command");
     }
 
+    void handle_set_env(int fd, const std::string &id, const std::string &kv) {
+        auto it = sessions_.find(id);
+        if (it == sessions_.end()) {
+            send_error(fd, "not_found");
+            return;
+        }
+        auto eq = kv.find('=');
+        if (eq == std::string::npos || eq == 0) {
+            send_error(fd, "invalid_env");
+            return;
+        }
+        std::string key = kv.substr(0, eq);
+        std::string val = kv.substr(eq + 1);
+        it->second.env_vars[key] = val;
+        send_status(fd, id);
+    }
+
+    void handle_del_env(int fd, const std::string &id, const std::string &key) {
+        auto it = sessions_.find(id);
+        if (it == sessions_.end()) {
+            send_error(fd, "not_found");
+            return;
+        }
+        it->second.env_vars.erase(key);
+        send_status(fd, id);
+    }
+
+    void handle_list_env(int fd, const std::string &id) {
+        auto it = sessions_.find(id);
+        if (it == sessions_.end()) {
+            send_error(fd, "not_found");
+            return;
+        }
+        std::ostringstream oss;
+        oss << "{";
+        bool first = true;
+        for (const auto &kv : it->second.env_vars) {
+            if (!first) oss << ",";
+            oss << debuglantern::json_kv(kv.first, kv.second, true);
+            first = false;
+        }
+        oss << "}\n";
+        send_response(fd, oss.str());
+    }
+
+    static std::vector<std::string> build_env(const std::map<std::string, std::string> &overrides) {
+        std::map<std::string, std::string> merged;
+        // Start with current environ
+        for (char **e = environ; *e; ++e) {
+            std::string entry(*e);
+            auto eq = entry.find('=');
+            if (eq != std::string::npos) {
+                merged[entry.substr(0, eq)] = entry.substr(eq + 1);
+            }
+        }
+        // Apply overrides
+        for (const auto &kv : overrides) {
+            merged[kv.first] = kv.second;
+        }
+        std::vector<std::string> result;
+        result.reserve(merged.size());
+        for (const auto &kv : merged) {
+            result.push_back(kv.first + "=" + kv.second);
+        }
+        return result;
+    }
+
+    static std::vector<char *> env_ptrs(std::vector<std::string> &env_strs) {
+        std::vector<char *> ptrs;
+        ptrs.reserve(env_strs.size() + 1);
+        for (auto &s : env_strs) {
+            ptrs.push_back(s.data());
+        }
+        ptrs.push_back(nullptr);
+        return ptrs;
+    }
+
+    void handle_set_args(int fd, const std::string &id, const std::string &args) {
+        auto it = sessions_.find(id);
+        if (it == sessions_.end()) {
+            send_error(fd, "not_found");
+            return;
+        }
+        it->second.saved_args = args;
+        send_status(fd, id);
+    }
+
+    static std::vector<std::string> split_args(const std::string &s) {
+        std::vector<std::string> result;
+        std::istringstream iss(s);
+        std::string tok;
+        while (iss >> tok) {
+            result.push_back(tok);
+        }
+        return result;
+    }
+
     void handle_start(int fd, const std::string &id, bool debug) {
         auto it = sessions_.find(id);
         if (it == sessions_.end()) {
@@ -813,8 +973,21 @@ private:
             return;
         }
 
+        // Clear previous output
+        s.output.clear();
+
+        auto args = split_args(s.saved_args);
+        auto env_strs = build_env(s.env_vars);
+        auto envp = env_ptrs(env_strs);
+
         if (s.is_bundle) {
-            handle_start_bundle(fd, s, debug);
+            handle_start_bundle(fd, s, debug, args, envp);
+            return;
+        }
+
+        int pipefd[2];
+        if (pipe(pipefd) < 0) {
+            send_error(fd, "fork_failed");
             return;
         }
 
@@ -822,21 +995,37 @@ private:
             int port = alloc_debug_port();
             pid_t child = fork();
             if (child == 0) {
+                close(pipefd[0]);
+                dup2(pipefd[1], STDOUT_FILENO);
+                dup2(pipefd[1], STDERR_FILENO);
+                close(pipefd[1]);
                 prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
                 std::string fdpath = "/proc/self/fd/" + std::to_string(s.memfd);
                 std::string port_arg = ":" + std::to_string(port);
-                execlp("gdbserver", "gdbserver", port_arg.c_str(), fdpath.c_str(), nullptr);
+                std::vector<char *> argv_vec;
+                argv_vec.push_back(const_cast<char *>("gdbserver"));
+                argv_vec.push_back(const_cast<char *>(port_arg.c_str()));
+                argv_vec.push_back(const_cast<char *>(fdpath.c_str()));
+                for (const auto &a : args) {
+                    argv_vec.push_back(const_cast<char *>(a.c_str()));
+                }
+                argv_vec.push_back(nullptr);
+                execvpe("gdbserver", argv_vec.data(), envp.data());
                 _exit(127);
             }
             if (child < 0) {
+                close(pipefd[0]);
+                close(pipefd[1]);
                 send_error(fd, "fork_failed");
                 return;
             }
 
+            close(pipefd[1]);
             s.pid = child;
             s.gdb_pid = child;
             s.debug_port = port;
             s.state = 2;
+            setup_output_pipe(s, pipefd[0]);
             add_watch(child, s.id, true);
             send_status(fd, s.id);
             return;
@@ -844,49 +1033,85 @@ private:
 
         pid_t child = fork();
         if (child == 0) {
+            close(pipefd[0]);
+            dup2(pipefd[1], STDOUT_FILENO);
+            dup2(pipefd[1], STDERR_FILENO);
+            close(pipefd[1]);
             prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
-            char *argv[] = {const_cast<char *>("/proc/self/fd/X"), nullptr};
             std::string path = "/proc/self/fd/" + std::to_string(s.memfd);
-            argv[0] = const_cast<char *>(path.c_str());
-            fexecve(s.memfd, argv, environ);
+            std::vector<char *> argv_vec;
+            argv_vec.push_back(const_cast<char *>(path.c_str()));
+            for (const auto &a : args) {
+                argv_vec.push_back(const_cast<char *>(a.c_str()));
+            }
+            argv_vec.push_back(nullptr);
+            fexecve(s.memfd, argv_vec.data(), envp.data());
             _exit(127);
         }
 
         if (child < 0) {
+            close(pipefd[0]);
+            close(pipefd[1]);
             send_error(fd, "fork_failed");
             return;
         }
 
+        close(pipefd[1]);
         s.pid = child;
         s.state = 1;
+        setup_output_pipe(s, pipefd[0]);
         add_watch(child, s.id, false);
         send_status(fd, s.id);
     }
 
-    void handle_start_bundle(int fd, Session &s, bool debug) {
+    void handle_start_bundle(int fd, Session &s, bool debug,
+                             const std::vector<std::string> &args,
+                             std::vector<char *> &envp) {
         std::string full_exec = s.bundle_dir + "/" + s.exec_path;
+
+        int pipefd[2];
+        if (pipe(pipefd) < 0) {
+            send_error(fd, "fork_failed");
+            return;
+        }
 
         if (debug) {
             int port = alloc_debug_port();
             pid_t child = fork();
             if (child == 0) {
+                close(pipefd[0]);
+                dup2(pipefd[1], STDOUT_FILENO);
+                dup2(pipefd[1], STDERR_FILENO);
+                close(pipefd[1]);
                 prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
                 if (chdir(s.bundle_dir.c_str()) != 0) {
                     _exit(127);
                 }
                 std::string port_arg = ":" + std::to_string(port);
-                execlp("gdbserver", "gdbserver", port_arg.c_str(), full_exec.c_str(), nullptr);
+                std::vector<char *> argv_vec;
+                argv_vec.push_back(const_cast<char *>("gdbserver"));
+                argv_vec.push_back(const_cast<char *>(port_arg.c_str()));
+                argv_vec.push_back(const_cast<char *>(full_exec.c_str()));
+                for (const auto &a : args) {
+                    argv_vec.push_back(const_cast<char *>(a.c_str()));
+                }
+                argv_vec.push_back(nullptr);
+                execvpe("gdbserver", argv_vec.data(), envp.data());
                 _exit(127);
             }
             if (child < 0) {
+                close(pipefd[0]);
+                close(pipefd[1]);
                 send_error(fd, "fork_failed");
                 return;
             }
 
+            close(pipefd[1]);
             s.pid = child;
             s.gdb_pid = child;
             s.debug_port = port;
             s.state = 2;
+            setup_output_pipe(s, pipefd[0]);
             add_watch(child, s.id, true);
             send_status(fd, s.id);
             return;
@@ -894,24 +1119,106 @@ private:
 
         pid_t child = fork();
         if (child == 0) {
+            close(pipefd[0]);
+            dup2(pipefd[1], STDOUT_FILENO);
+            dup2(pipefd[1], STDERR_FILENO);
+            close(pipefd[1]);
             prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
             if (chdir(s.bundle_dir.c_str()) != 0) {
                 _exit(127);
             }
-            char *argv[] = {const_cast<char *>(full_exec.c_str()), nullptr};
-            execve(full_exec.c_str(), argv, environ);
+            std::vector<char *> argv_vec;
+            argv_vec.push_back(const_cast<char *>(full_exec.c_str()));
+            for (const auto &a : args) {
+                argv_vec.push_back(const_cast<char *>(a.c_str()));
+            }
+            argv_vec.push_back(nullptr);
+            execve(full_exec.c_str(), argv_vec.data(), envp.data());
             _exit(127);
         }
 
         if (child < 0) {
+            close(pipefd[0]);
+            close(pipefd[1]);
             send_error(fd, "fork_failed");
             return;
         }
 
+        close(pipefd[1]);
         s.pid = child;
         s.state = 1;
+        setup_output_pipe(s, pipefd[0]);
         add_watch(child, s.id, false);
         send_status(fd, s.id);
+    }
+
+    void setup_output_pipe(Session &s, int read_fd) {
+        debuglantern::set_nonblocking(read_fd);
+        epoll_event ev{};
+        ev.events = EPOLLIN;
+        ev.data.fd = read_fd;
+        if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, read_fd, &ev) < 0) {
+            close(read_fd);
+            return;
+        }
+        s.output_pipe_fd = read_fd;
+        output_pipes_[read_fd] = OutputPipeInfo{s.id};
+    }
+
+    void close_output_pipe(Session &s) {
+        if (s.output_pipe_fd >= 0) {
+            epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, s.output_pipe_fd, nullptr);
+            close(s.output_pipe_fd);
+            output_pipes_.erase(s.output_pipe_fd);
+            s.output_pipe_fd = -1;
+        }
+    }
+
+    void handle_output_pipe(int pipefd, const OutputPipeInfo &info) {
+        char buf[4096];
+        ssize_t n = read(pipefd, buf, sizeof(buf));
+        if (n <= 0) {
+            // Pipe closed
+            epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, pipefd, nullptr);
+            close(pipefd);
+            auto it = sessions_.find(info.session_id);
+            if (it != sessions_.end() && it->second.output_pipe_fd == pipefd) {
+                it->second.output_pipe_fd = -1;
+            }
+            output_pipes_.erase(pipefd);
+            return;
+        }
+
+        auto it = sessions_.find(info.session_id);
+        if (it != sessions_.end()) {
+            it->second.output.append(buf, static_cast<size_t>(n));
+            if (it->second.output.size() > kMaxOutputBuffer) {
+                it->second.output.erase(0,
+                    it->second.output.size() - kMaxOutputBuffer);
+            }
+        }
+    }
+
+    void handle_output(int fd, const std::string &id, size_t offset) {
+        auto it = sessions_.find(id);
+        if (it == sessions_.end()) {
+            send_error(fd, "not_found");
+            return;
+        }
+
+        const Session &s = it->second;
+        std::string data;
+        if (offset < s.output.size()) {
+            data = s.output.substr(offset);
+        }
+
+        std::ostringstream oss;
+        oss << "{" << debuglantern::json_kv("id", s.id, true) << ","
+            << debuglantern::json_kv("output", data, true) << ","
+            << debuglantern::json_kv("offset", static_cast<long long>(offset)) << ","
+            << debuglantern::json_kv("total", static_cast<long long>(s.output.size()))
+            << "}\n";
+        send_response(fd, oss.str());
     }
 
     void handle_stop(int fd, const std::string &id, int sig) {
@@ -986,6 +1293,7 @@ private:
             close(s.memfd);
             s.memfd = -1;
         }
+        close_output_pipe(s);
         if (s.is_bundle && !s.bundle_dir.empty()) {
             remove_directory_recursive(s.bundle_dir);
         }
@@ -1043,6 +1351,19 @@ private:
             oss << "," << debuglantern::json_kv("bundle", true);
             oss << "," << debuglantern::json_kv("exec_path", s.exec_path, true);
         }
+        if (!s.saved_args.empty()) {
+            oss << "," << debuglantern::json_kv("args", s.saved_args, true);
+        }
+        if (!s.env_vars.empty()) {
+            oss << ",\"env\":{";
+            bool first = true;
+            for (const auto &kv : s.env_vars) {
+                if (!first) oss << ",";
+                oss << debuglantern::json_kv(kv.first, kv.second, true);
+                first = false;
+            }
+            oss << "}";
+        }
         oss << "}";
         return oss.str();
     }
@@ -1066,6 +1387,7 @@ private:
         if (code == "tmpfile_create_failed") return "failed to create temporary file";
         if (code == "tmpdir_create_failed") return "failed to create temporary directory";
         if (code == "extract_failed") return "failed to extract tar.gz bundle";
+        if (code == "invalid_env") return "env format must be KEY=VALUE";
         return "unspecified error";
     }
 
@@ -1173,6 +1495,7 @@ private:
 
     std::unordered_map<int, ClientConn> clients_;
     std::unordered_map<int, WatchInfo> watches_;
+    std::unordered_map<int, OutputPipeInfo> output_pipes_;
     std::unordered_map<std::string, Session> sessions_;
     size_t total_bytes_ = 0;
     int debug_port_next_ = kDefaultDebugPortBase;

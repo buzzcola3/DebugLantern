@@ -54,11 +54,34 @@ th{color:var(--gray);font-size:.75rem;text-transform:uppercase;letter-spacing:1p
 .actions button{background:var(--card);border:1px solid var(--border);color:var(--text);padding:4px 10px;border-radius:6px;cursor:pointer;font-size:.75rem;margin-right:4px;font-family:inherit;transition:border-color .15s}
 .actions button:hover{border-color:var(--accent)}
 .actions button.danger:hover{border-color:#ff4444}
+.actions button:disabled{opacity:.35;cursor:not-allowed;border-color:var(--border)}
+.actions .cfg-toggle{background:none;border:1px solid var(--border);color:var(--gray);padding:3px 8px;border-radius:4px;font-size:.7rem;cursor:pointer}
+.actions .cfg-toggle:hover{border-color:var(--accent);color:var(--text)}
+.config-row td{padding:0 12px 12px 12px;border-bottom:1px solid var(--border)}
+.config-panel{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.config-panel .cfg-section{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.config-panel label{font-size:.7rem;color:var(--gray);text-transform:uppercase;letter-spacing:.5px;min-width:32px}
+.config-panel input{background:var(--card);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-size:.75rem;font-family:inherit}
+.config-panel input.args-input{flex:1;min-width:140px}
+.config-panel input.env-input{width:180px}
+.config-panel input::placeholder{color:var(--gray)}
+.config-panel button{background:var(--card);border:1px solid var(--border);color:var(--text);padding:4px 10px;border-radius:6px;cursor:pointer;font-size:.75rem;font-family:inherit;transition:border-color .15s}
+.config-panel button:hover{border-color:var(--accent)}
+.config-panel button:disabled{opacity:.35;cursor:not-allowed;border-color:var(--border)}
+.env-tags{display:flex;flex-wrap:wrap;gap:4px;margin-left:38px}
+.env-tag{display:inline-flex;align-items:center;background:var(--card);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:.7rem;font-family:inherit;color:var(--text);gap:4px}
+.env-tag .env-x{color:var(--gray);cursor:pointer;font-weight:bold}
+.env-tag .env-x:hover{color:#ff4444}
 .empty{text-align:center;color:var(--gray);padding:48px;font-size:.9rem}
 .toast-container{position:fixed;bottom:20px;right:20px;z-index:1000;display:flex;flex-direction:column-reverse;gap:8px}
 .toast{background:var(--card);border:1px solid var(--border);padding:10px 18px;border-radius:8px;font-size:.8rem;animation:fadeIn .25s ease}
 .toast.error{border-color:var(--accent)}
 @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.output-panel{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px;margin-top:16px;display:none}
+.output-panel h3{font-size:.85rem;color:var(--gray);margin-bottom:8px;display:flex;align-items:center;justify-content:space-between}
+.output-panel h3 button{background:none;border:1px solid var(--border);color:var(--gray);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:.7rem;font-family:inherit}
+.output-panel h3 button:hover{border-color:var(--accent);color:var(--text)}
+.output-content{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:.75rem;max-height:400px;overflow-y:auto;white-space:pre-wrap;word-wrap:break-word;line-height:1.5;color:var(--green)}
 </style>
 </head>
 <body>
@@ -87,11 +110,20 @@ th{color:var(--gray);font-size:.75rem;text-transform:uppercase;letter-spacing:1p
     <tbody id="sessions"></tbody>
   </table>
   <div class="empty" id="empty">No sessions</div>
+  <div class="output-panel" id="output-panel">
+    <h3><span>Output: <span id="output-session-id"></span></span><span><button onclick="clearOutput()">Clear</button> <button onclick="closeOutput()">Close</button></span></h3>
+    <div class="output-content" id="output-content"></div>
+  </div>
 </div>
 <div class="toast-container" id="toasts"></div>
 <script>
 const $=s=>document.getElementById(s);
 let connected=false;
+let outputSessionId=null;
+let outputOffset=0;
+let outputTimer=null;
+let openConfigs=new Set();
+let lastSessionData={};
 
 function toast(msg,err){
   const el=document.createElement('div');
@@ -105,37 +137,114 @@ function badge(state){
   return '<span class="badge badge-'+state.toLowerCase()+'">'+state+'</span>';
 }
 
-function actions(s){
+function toggleConfig(id){
+  if(openConfigs.has(id)){openConfigs.delete(id);}else{openConfigs.add(id);}
+  renderFromCache();
+}
+
+function actionButtons(s){
   let h='';
+  h+='<button class="cfg-toggle" onclick="toggleConfig(\''+s.id+'\')">'+(openConfigs.has(s.id)?'&#x25B4; Config':'&#x25BE; Config')+'</button>';
   if(s.state==='LOADED'||s.state==='STOPPED'){
-    h+='<button onclick="act(\'start\',\''+s.id+'\')">Start</button>';
-    h+='<button onclick="act(\'start\',\''+s.id+'\',true)">Debug Start</button>';
-    h+='<button class="danger" onclick="act(\'delete\',\''+s.id+'\')">Delete</button>';
+    h+='<button onclick="act(\'start\',\''+s.id+'\')">&blacktriangleright; Start</button>';
+    h+='<button onclick="act(\'start\',\''+s.id+'\',true)">&#x1F41B; Debug</button>';
+    h+='<button class="danger" onclick="act(\'delete\',\''+s.id+'\')">&times; Delete</button>';
   }
   if(s.state==='RUNNING'){
-    h+='<button onclick="act(\'debug\',\''+s.id+'\')">Attach GDB</button>';
-    h+='<button onclick="act(\'stop\',\''+s.id+'\')">Stop</button>';
-    h+='<button class="danger" onclick="act(\'kill\',\''+s.id+'\')">Kill</button>';
+    h+='<button onclick="showOutput(\''+s.id+'\')">&#x23F5; Output</button>';
+    h+='<button onclick="act(\'debug\',\''+s.id+'\')">&#x1F41B; Attach GDB</button>';
+    h+='<button onclick="act(\'stop\',\''+s.id+'\')">&#x23F9; Stop</button>';
+    h+='<button class="danger" onclick="act(\'kill\',\''+s.id+'\')">&#x2620; Kill</button>';
   }
   if(s.state==='DEBUGGING'){
-    h+='<button onclick="act(\'stop\',\''+s.id+'\')">Stop</button>';
-    h+='<button class="danger" onclick="act(\'kill\',\''+s.id+'\')">Kill</button>';
+    h+='<button onclick="showOutput(\''+s.id+'\')">&#x23F5; Output</button>';
+    h+='<button onclick="act(\'stop\',\''+s.id+'\')">&#x23F9; Stop</button>';
+    h+='<button class="danger" onclick="act(\'kill\',\''+s.id+'\')">&#x2620; Kill</button>';
+  }
+  if(s.state==='STOPPED'){
+    h+='<button onclick="showOutput(\''+s.id+'\')">&#x23F5; Output</button>';
   }
   return h;
 }
 
+function configRow(s){
+  if(!openConfigs.has(s.id))return '';
+  const canSave=s.state==='LOADED'||s.state==='STOPPED';
+  const dis=canSave?'':' disabled';
+  let h='<tr class="config-row" data-cfg="'+s.id+'"><td colspan="5"><div class="config-panel">';
+  h+='<div class="cfg-section">';
+  h+='<label>args</label>';
+  h+='<input class="args-input" id="args-'+s.id+'" placeholder="arg1 arg2 ..." value="'+(s.args?s.args.replace(/"/g,'&quot;'):'')+'">';
+  h+='<button onclick="saveArgs(\''+s.id+'\')"'+dis+'>Save</button>';
+  h+='</div>';
+  h+='<div class="cfg-section">';
+  h+='<label>env</label>';
+  h+='<input class="env-input" id="env-'+s.id+'" placeholder="KEY=VALUE">';
+  h+='<button onclick="saveEnv(\''+s.id+'\')"'+dis+'>Add</button>';
+  h+='</div>';
+  if(s.env&&Object.keys(s.env).length){
+    h+='<div class="env-tags">';
+    for(const k of Object.keys(s.env)){
+      const v=s.env[k];
+      h+='<span class="env-tag">'+k+'='+v;
+      if(canSave)h+=' <span class="env-x" onclick="delEnv(\''+s.id+'\',\''+k.replace(/'/g,"\\'")+'\')">&times;</span>';
+      h+='</span>';
+    }
+    h+='</div>';
+  }
+  h+='</div></td></tr>';
+  return h;
+}
+
 function render(sessions){
+  const focused=document.activeElement;
+  let focusId=null,focusPos=0,focusVal='';
+  if(focused&&focused.tagName==='INPUT'&&focused.id){
+    focusId=focused.id;
+    focusPos=focused.selectionStart||0;
+    focusVal=focused.value;
+  }
+  const inputVals={};
+  document.querySelectorAll('.config-panel input').forEach(inp=>{
+    if(inp.id)inputVals[inp.id]=inp.value;
+  });
+
+  lastSessionData={};
+  sessions.forEach(s=>{lastSessionData[s.id]=s;});
+
   const tb=$('sessions');
   $('table').style.display=sessions.length?'table':'none';
   $('empty').style.display=sessions.length?'none':'block';
   $('session-count').textContent=sessions.length+' session'+(sessions.length!==1?'s':'');
-  tb.innerHTML=sessions.map(s=>'<tr>'+
-    '<td class="id-cell" title="'+s.id+'" onclick="navigator.clipboard.writeText(\''+s.id+'\');toast(\'Copied ID\')">'+s.id.substring(0,8)+'&hellip;</td>'+
-    '<td>'+badge(s.state)+'</td>'+
-    '<td>'+(s.pid||'&mdash;')+'</td>'+
-    '<td>'+(s.debug_port||'&mdash;')+'</td>'+
-    '<td class="actions">'+actions(s)+'</td>'+
-    '</tr>').join('');
+  tb.innerHTML=sessions.map(s=>{
+    let row='<tr>';
+    row+='<td class="id-cell" title="'+s.id+'" onclick="navigator.clipboard.writeText(\''+s.id+'\');toast(\'Copied ID\')">'+s.id.substring(0,8)+'&hellip;</td>';
+    row+='<td>'+badge(s.state)+'</td>';
+    row+='<td>'+(s.pid||'&mdash;')+'</td>';
+    row+='<td>'+(s.debug_port||'&mdash;')+'</td>';
+    row+='<td class="actions">'+actionButtons(s)+'</td>';
+    row+='</tr>';
+    row+=configRow(s);
+    return row;
+  }).join('');
+
+  for(const [id,val] of Object.entries(inputVals)){
+    const el=$(id);
+    if(el)el.value=val;
+  }
+  if(focusId){
+    const el=$(focusId);
+    if(el){
+      el.value=focusVal;
+      el.focus();
+      try{el.setSelectionRange(focusPos,focusPos);}catch(e){}
+    }
+  }
+}
+
+function renderFromCache(){
+  const sessions=Object.values(lastSessionData);
+  if(sessions.length)render(sessions);
 }
 
 async function refresh(){
@@ -162,6 +271,76 @@ async function act(cmd,id,debug){
     else{toast(cmd+': '+d.state);}
     refresh();
   }catch(e){toast('Failed: '+e.message,true);}
+}
+
+async function saveArgs(id){
+  try{
+    const argsInput=$('args-'+id);
+    const argsVal=argsInput?argsInput.value.trim():'';
+    const r=await fetch('/api/sessions/'+id+'/args',{method:'POST',headers:{'Content-Type':'text/plain'},body:argsVal});
+    const d=await r.json();
+    if(d.error_code){toast(d.message,true);}
+    else{toast('Args saved');}
+    refresh();
+  }catch(e){toast('Failed: '+e.message,true);}
+}
+
+async function saveEnv(id){
+  try{
+    const inp=$('env-'+id);
+    const val=inp?inp.value.trim():'';
+    if(!val||!val.includes('=')){toast('Format: KEY=VALUE',true);return;}
+    const r=await fetch('/api/sessions/'+id+'/env',{method:'POST',headers:{'Content-Type':'text/plain'},body:val});
+    const d=await r.json();
+    if(d.error_code){toast(d.message,true);}
+    else{toast('Env set');if(inp)inp.value='';}
+    refresh();
+  }catch(e){toast('Failed: '+e.message,true);}
+}
+
+async function delEnv(id,key){
+  try{
+    const r=await fetch('/api/sessions/'+id+'/envdel',{method:'POST',headers:{'Content-Type':'text/plain'},body:key});
+    const d=await r.json();
+    if(d.error_code){toast(d.message,true);}
+    else{toast('Env removed');}
+    refresh();
+  }catch(e){toast('Failed: '+e.message,true);}
+}
+
+async function showOutput(id){
+  outputSessionId=id;
+  outputOffset=0;
+  $('output-content').textContent='';
+  $('output-session-id').textContent=id.substring(0,8)+'...';
+  $('output-panel').style.display='block';
+  fetchOutput();
+  if(outputTimer)clearInterval(outputTimer);
+  outputTimer=setInterval(fetchOutput,1000);
+}
+
+async function fetchOutput(){
+  if(!outputSessionId)return;
+  try{
+    const r=await fetch('/api/sessions/'+outputSessionId+'/output?offset='+outputOffset);
+    const d=await r.json();
+    if(d.output&&d.output.length>0){
+      $('output-content').textContent+=d.output;
+      const el=$('output-content');
+      el.scrollTop=el.scrollHeight;
+    }
+    if(d.total!==undefined)outputOffset=d.total;
+  }catch(e){}
+}
+
+function closeOutput(){
+  $('output-panel').style.display='none';
+  outputSessionId=null;
+  if(outputTimer){clearInterval(outputTimer);outputTimer=null;}
+}
+
+function clearOutput(){
+  $('output-content').textContent='';
 }
 
 async function upload(file){
@@ -455,6 +634,21 @@ void WebUI::handle_client(int fd) {
         return;
     }
 
+    // GET /api/sessions/{id}/output
+    if (req.method == "GET" && parts.size() == 4 &&
+        parts[0] == "api" && parts[1] == "sessions" && parts[3] == "output") {
+        std::string offset = "0";
+        auto opos = req.query.find("offset=");
+        if (opos != std::string::npos) {
+            offset = req.query.substr(opos + 7);
+            auto amp = offset.find('&');
+            if (amp != std::string::npos) offset = offset.substr(0, amp);
+        }
+        auto resp = proxy("OUTPUT " + parts[2] + " " + offset);
+        send_http(fd, 200, "application/json", resp);
+        return;
+    }
+
     // POST /api/upload
     if (req.method == "POST" && parts.size() == 2 &&
         parts[0] == "api" && parts[1] == "upload") {
@@ -472,10 +666,28 @@ void WebUI::handle_client(int fd) {
         if (action == "start") {
             cmd = "START " + id;
             if (req.query.find("debug") != std::string::npos) cmd += " --debug";
+        } else if (action == "args") {
+            cmd = "ARGS " + id + " " + req.body;
+        } else if (action == "env") {
+            cmd = "ENV " + id + " " + req.body;
+        } else if (action == "envdel") {
+            cmd = "ENVDEL " + id + " " + req.body;
+        } else if (action == "envlist") {
+            cmd = "ENVLIST " + id;
         } else if (action == "stop")   { cmd = "STOP " + id; }
           else if (action == "kill")   { cmd = "KILL " + id; }
           else if (action == "debug")  { cmd = "DEBUG " + id; }
           else if (action == "delete") { cmd = "DELETE " + id; }
+          else if (action == "output") {
+            std::string offset = "0";
+            auto opos = req.query.find("offset=");
+            if (opos != std::string::npos) {
+                offset = req.query.substr(opos + 7);
+                auto amp = offset.find('&');
+                if (amp != std::string::npos) offset = offset.substr(0, amp);
+            }
+            cmd = "OUTPUT " + id + " " + offset;
+          }
 
         if (!cmd.empty()) {
             auto resp = proxy(cmd);
