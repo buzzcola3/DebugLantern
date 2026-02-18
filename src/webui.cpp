@@ -82,6 +82,12 @@ th{color:var(--gray);font-size:.75rem;text-transform:uppercase;letter-spacing:1p
 .output-panel h3 button{background:none;border:1px solid var(--border);color:var(--gray);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:.7rem;font-family:inherit}
 .output-panel h3 button:hover{border-color:var(--accent);color:var(--text)}
 .output-content{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:.75rem;max-height:400px;overflow-y:auto;white-space:pre-wrap;word-wrap:break-word;line-height:1.5;color:var(--green)}
+.activity-panel{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px;margin-top:16px}
+.activity-panel h3{font-size:.85rem;color:var(--gray);margin-bottom:8px;display:flex;align-items:center;justify-content:space-between}
+.activity-panel h3 button{background:none;border:1px solid var(--border);color:var(--gray);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:.7rem;font-family:inherit}
+.activity-panel h3 button:hover{border-color:var(--accent);color:var(--text)}
+.activity-content{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:.75rem;max-height:200px;overflow-y:auto;white-space:pre-wrap;word-wrap:break-word;line-height:1.5;color:var(--yellow)}
+.activity-content .time{color:var(--gray);margin-right:8px}
 </style>
 </head>
 <body>
@@ -113,6 +119,10 @@ th{color:var(--gray);font-size:.75rem;text-transform:uppercase;letter-spacing:1p
   <div class="output-panel" id="output-panel">
     <h3><span>Output: <span id="output-session-id"></span></span><span><button onclick="clearOutput()">Clear</button> <button onclick="closeOutput()">Close</button></span></h3>
     <div class="output-content" id="output-content"></div>
+  </div>
+  <div class="activity-panel" id="activity-panel">
+    <h3><span>&#x1F4CB; Activity</span><span><button onclick="clearActivity()">Clear</button></span></h3>
+    <div class="activity-content" id="activity-content">No activity yet</div>
   </div>
 </div>
 <div class="toast-container" id="toasts"></div>
@@ -397,9 +407,29 @@ let evtSrc;
 function connectSSE(){
   evtSrc=new EventSource('/api/events');
   evtSrc.onmessage=e=>{try{render(JSON.parse(e.data));setConnected(true);}catch(err){}};
+  evtSrc.addEventListener('activity',e=>{try{updateActivity(JSON.parse(e.data));}catch(err){}});
   evtSrc.onerror=()=>{evtSrc.close();setConnected(false);setTimeout(connectSSE,3000);};
 }
 connectSSE();
+
+function updateActivity(entries){
+  if(!entries||!entries.length){return;}
+  const el=$('activity-content');
+  if(el.textContent==='No activity yet')el.textContent='';
+  const existing=el.dataset.count?parseInt(el.dataset.count):0;
+  const newEntries=entries.slice(existing);
+  for(const e of newEntries){
+    const t=e.time?e.time.substring(11,19):'';
+    el.textContent+='['+t+'] '+e.message+'\n';
+  }
+  el.dataset.count=entries.length;
+  el.scrollTop=el.scrollHeight;
+}
+
+function clearActivity(){
+  $('activity-content').textContent='No activity yet';
+  $('activity-content').dataset.count='0';
+}
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});
 refresh();
 </script>
@@ -627,6 +657,13 @@ void WebUI::handle_client(int fd) {
         send_http(fd, 200, "application/json", resp);
         return;
     }
+    // GET /api/activity
+    if (req.method == "GET" && parts.size() == 2 &&
+        parts[0] == "api" && parts[1] == "activity") {
+        auto resp = proxy("ACTIVITY");
+        send_http(fd, 200, "application/json", resp);
+        return;
+    }
     // GET /api/events (SSE)
     if (req.method == "GET" && parts.size() == 2 &&
         parts[0] == "api" && parts[1] == "events") {
@@ -725,6 +762,12 @@ void WebUI::serve_sse(int fd) {
         std::string data = trim_newlines(proxy("LIST"));
         std::string event = "data: " + data + "\n\n";
         ssize_t n = write(fd, event.data(), event.size());
+        if (n <= 0) break;
+
+        // Send activity as a named event
+        std::string activity = trim_newlines(proxy("ACTIVITY"));
+        std::string act_event = "event: activity\ndata: " + activity + "\n\n";
+        n = write(fd, act_event.data(), act_event.size());
         if (n <= 0) break;
 
         for (int i = 0; i < 10 && running_; i++) {
