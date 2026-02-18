@@ -257,15 +257,15 @@ No SSH. No SCP. No filesystem pollution. Everything ephemeral.
 
 ## Download Device Sysroot
 
-Download the device's shared libraries for GDB debug symbol resolution:
+Download the device's shared libraries for GDB debug symbol resolution (uncompressed tar):
 
 ```sh
 debuglanternctl sysroot ~/pi-sysroot --target target-board.local
 ```
 
 ```
-downloading sysroot: 104857600 bytes...
-  100 / 100 MB - done
+downloading sysroot: 1216706560 bytes...
+  1160 / 1160 MB - done
 extracting to /home/user/pi-sysroot...
 sysroot saved to /home/user/pi-sysroot
 ```
@@ -295,8 +295,8 @@ debuglanternctl deps --target target-board.local
 {
   "deps": [
     { "name": "gdbserver", "description": "Required for debug attach and start --debug", "available": true, "required": true },
-    { "name": "tar", "description": "Required for bundle (tar.gz) extraction", "available": true, "required": true },
-    { "name": "gzip", "description": "Required for bundle (tar.gz) decompression", "available": true, "required": true }
+    { "name": "tar", "description": "Required for bundle extraction and sysroot creation", "available": true, "required": true },
+    { "name": "gzip", "description": "Optional: only required if you upload gzip-compressed bundles", "available": true, "required": false }
   ],
   "all_satisfied": true
 }

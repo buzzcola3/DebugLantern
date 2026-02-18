@@ -54,11 +54,17 @@ SP             := " "
   - Returns a JSON object listing required system dependencies and whether each is available on the host.
   - No arguments.
 - `SYSROOT`
-  - Downloads a tar.gz archive of the device's shared libraries for use as a GDB sysroot.
+  - Downloads an uncompressed tar archive of the device's shared libraries for use as a GDB sysroot (no gzip compression).
   - No arguments.
   - Collects `/lib`, `/lib64`, `/usr/lib`, and `/usr/lib/debug` (with symlinks dereferenced).
-  - Response: `SYSROOT <size>\n` header followed by `<size>` raw bytes of tar.gz data.
+  - Response: `SYSROOT <size>\n` header followed by `<size>` raw bytes of tar data.
   - On error, returns a standard JSON error response instead.
+
+- `ACTIVITY`
+  - Returns recent daemon activity entries for display in the web UI or CLI.
+  - No arguments.
+  - Response: a single-line JSON array of activity objects, each with `time` and `message` fields.
+  - The server also emits SSE `activity` named events to connected web dashboards containing the same entries.
 
 ## Responses
 
@@ -123,7 +129,7 @@ Success:
 
 ```
 SYSROOT 104857600
-<104857600 raw bytes of tar.gz>
+<104857600 raw bytes of tar>
 ```
 
 Error:

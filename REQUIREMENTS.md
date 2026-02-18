@@ -98,8 +98,8 @@ The daemon checks for the following system packages at runtime:
 | Dependency | Purpose | Required |
 |------------|---------|----------|
 | `gdbserver` | Debug attach and `start --debug` | Yes |
-| `tar` | Bundle (tar.gz) extraction | Yes |
-| `gzip` | Bundle (tar.gz) decompression | Yes |
+ | `tar` | Bundle extraction and sysroot creation | Yes |
+ | `gzip` | Optional: only required if uploading gzip-compressed bundles | No |
 
 Use the `DEPS` command (or `debuglanternctl deps`) to check availability. The web UI also displays dependency status.
 
