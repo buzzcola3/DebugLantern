@@ -860,6 +860,11 @@ private:
             return;
         }
 
+        if (cmd == "SYSROOT") {
+            handle_sysroot(conn.fd);
+            return;
+        }
+
         send_error(conn.fd, "unknown_command");
     }
 
@@ -1449,6 +1454,9 @@ private:
         if (code == "tmpdir_create_failed") return "failed to create temporary directory";
         if (code == "extract_failed") return "failed to extract tar.gz bundle";
         if (code == "invalid_env") return "env format must be KEY=VALUE";
+        if (code == "sysroot_tmpfile_failed") return "failed to create temp file for sysroot";
+        if (code == "sysroot_no_libs") return "no lib directories found on host";
+        if (code == "sysroot_tar_failed") return "failed to create sysroot tarball";
         return "unspecified error";
     }
 
@@ -1459,6 +1467,98 @@ private:
             << debuglantern::json_kv("message", error_message(err), true) << ","
             << debuglantern::json_kv("time", debuglantern::now_iso8601(), true) << "}\n";
         send_response(fd, oss.str());
+    }
+
+    void handle_sysroot(int fd) {
+        // Create temp file for the sysroot tarball
+        char tmppath[] = "/tmp/debuglantern-sysroot-XXXXXX";
+        int tmpfd = mkstemp(tmppath);
+        if (tmpfd < 0) {
+            send_error(fd, "sysroot_tmpfile_failed");
+            return;
+        }
+        close(tmpfd);
+
+        // Build tar command — collect lib dirs that exist
+        std::vector<std::string> dirs;
+        struct stat st;
+        if (::stat("/lib", &st) == 0) dirs.push_back("/lib");
+        if (::stat("/lib64", &st) == 0) dirs.push_back("/lib64");
+        if (::stat("/usr/lib", &st) == 0) dirs.push_back("/usr/lib");
+        if (::stat("/usr/lib/debug", &st) == 0) dirs.push_back("/usr/lib/debug");
+
+        if (dirs.empty()) {
+            unlink(tmppath);
+            send_error(fd, "sysroot_no_libs");
+            return;
+        }
+
+        // Build tar command: tar czf <tmppath> --dereference <dirs...>
+        std::string tar_cmd = "tar czf ";
+        tar_cmd += tmppath;
+        tar_cmd += " --dereference";
+        for (const auto &d : dirs) {
+            tar_cmd += " " + d;
+        }
+        tar_cmd += " 2>/dev/null";
+
+        int ret = system(tar_cmd.c_str());
+        if (ret != 0) {
+            // tar may return non-zero for permission errors but still produce output
+            struct stat check;
+            if (::stat(tmppath, &check) != 0 || check.st_size == 0) {
+                unlink(tmppath);
+                send_error(fd, "sysroot_tar_failed");
+                return;
+            }
+        }
+
+        // Get size of tarball
+        struct stat tarstat;
+        if (::stat(tmppath, &tarstat) != 0 || tarstat.st_size == 0) {
+            unlink(tmppath);
+            send_error(fd, "sysroot_tar_failed");
+            return;
+        }
+
+        size_t size = static_cast<size_t>(tarstat.st_size);
+
+        // Send header: SYSROOT <size>\n
+        std::string header = "SYSROOT " + std::to_string(size) + "\n";
+        ssize_t hw = write(fd, header.data(), header.size());
+        if (hw != static_cast<ssize_t>(header.size())) {
+            unlink(tmppath);
+            return;
+        }
+
+        // Stream the tarball to the client
+        int tfd = open(tmppath, O_RDONLY);
+        if (tfd < 0) {
+            unlink(tmppath);
+            return;
+        }
+
+        char buf[65536];
+        size_t remaining = size;
+        while (remaining > 0) {
+            size_t chunk = std::min(remaining, sizeof(buf));
+            ssize_t nr = read(tfd, buf, chunk);
+            if (nr <= 0) break;
+            size_t off = 0;
+            while (off < static_cast<size_t>(nr)) {
+                ssize_t nw = write(fd, buf + off, static_cast<size_t>(nr) - off);
+                if (nw <= 0) {
+                    close(tfd);
+                    unlink(tmppath);
+                    return;
+                }
+                off += static_cast<size_t>(nw);
+            }
+            remaining -= static_cast<size_t>(nr);
+        }
+
+        close(tfd);
+        unlink(tmppath);
     }
 
     void send_response(int fd, const std::string &payload) {

@@ -42,6 +42,9 @@ debuglanternctl debug <id> --target 192.168.1.50 --port 4444
 gdb ./my_app
 (gdb) target remote 192.168.1.50:<debug_port>
 
+# Download device sysroot for GDB
+debuglanternctl sysroot ~/pi-sysroot --target 192.168.1.50 --port 4444
+
 # Stop / Kill / Delete
 debuglanternctl stop <id> --target 192.168.1.50 --port 4444
 debuglanternctl kill <id> --target 192.168.1.50 --port 4444

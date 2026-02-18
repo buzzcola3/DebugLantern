@@ -71,6 +71,7 @@ LOADED  --START-->  RUNNING  --STOP/KILL-->  STOPPED
 | **start --debug** (bundle) | `gdbserver :PORT bundle_dir/exec_path` → state=DEBUGGING |
 | **delete** (single) | ensure stopped, `close(memfd)` → free RAM |
 | **delete** (bundle) | ensure stopped, `rm -rf bundle_dir` → free disk |
+| **sysroot** | tar `/lib`, `/lib64`, `/usr/lib`, `/usr/lib/debug` with `--dereference`, send `SYSROOT <size>\n` header + raw tar.gz bytes to client |
 
 ## Process Monitoring
 
@@ -86,7 +87,7 @@ Clients retrieve output via the `OUTPUT <id> [offset]` command. The `offset` par
 
 TCP, line-framed commands. JSON responses.
 
-Commands: `UPLOAD <size> [exec_path]`, `START <id> [--debug]`, `ARGS <id> <args...>`, `ENV <id> KEY=VALUE`, `ENVDEL <id> KEY`, `ENVLIST <id>`, `STOP <id>`, `KILL <id>`, `DEBUG <id>`, `LIST`, `STATUS <id>`, `DELETE <id>`, `OUTPUT <id> [offset]`, `DEPS`
+Commands: `UPLOAD <size> [exec_path]`, `START <id> [--debug]`, `ARGS <id> <args...>`, `ENV <id> KEY=VALUE`, `ENVDEL <id> KEY`, `ENVLIST <id>`, `STOP <id>`, `KILL <id>`, `DEBUG <id>`, `LIST`, `STATUS <id>`, `DELETE <id>`, `OUTPUT <id> [offset]`, `DEPS`, `SYSROOT`
 
 When `exec_path` is provided, the upload is treated as a tar.gz bundle. The server extracts the archive and uses the binary at `exec_path` (relative to bundle root) for execution and debugging.
 
