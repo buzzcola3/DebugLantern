@@ -349,7 +349,7 @@ int main(int argc, char **argv) {
         std::cerr << "downloading sysroot: " << size << " bytes..." << std::endl;
 
         // Save to temp file then extract
-        std::string tmppath = dest_dir + "/.sysroot-download.tar.gz";
+        std::string tmppath = dest_dir + "/.sysroot-download.tar";
         std::ofstream out(tmppath, std::ios::binary);
         if (!out) {
             std::cerr << "failed to create " << tmppath << "\n";
@@ -357,9 +357,19 @@ int main(int argc, char **argv) {
             return 1;
         }
 
+        // read_all may have consumed binary data past the header newline
         size_t remaining = size;
-        char buf[65536];
         size_t total_read = 0;
+        auto nl = header.find('\n');
+        if (nl != std::string::npos && nl + 1 < header.size()) {
+            std::string overflow = header.substr(nl + 1);
+            size_t take = std::min(overflow.size(), remaining);
+            out.write(overflow.data(), static_cast<std::streamsize>(take));
+            remaining -= take;
+            total_read += take;
+        }
+
+        char buf[65536];
         while (remaining > 0) {
             size_t chunk = std::min(remaining, sizeof(buf));
             ssize_t n = read(fd, buf, chunk);
@@ -390,7 +400,7 @@ int main(int argc, char **argv) {
 
         // Extract
         std::cerr << "extracting to " << dest_dir << "..." << std::endl;
-        std::string tar_cmd = "tar xzf " + tmppath + " -C " + dest_dir;
+        std::string tar_cmd = "tar xf " + tmppath + " -C " + dest_dir;
         int ret = system(tar_cmd.c_str());
         unlink(tmppath.c_str());
 
