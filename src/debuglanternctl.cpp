@@ -28,16 +28,14 @@ void usage() {
                  "          args <id> \"arg1 arg2 ...\", start <id> [--debug],\n"
                  "          env <id> KEY=VALUE, envdel <id> KEY, envlist <id>,\n"
                  "          stop <id>, kill <id>, debug <id>, list, status <id>, delete <id>,\n"
-                 "          output <id> [--follow], deps,\n"
-                 "          sysroot <dest-dir>\n"
+                 "          output <id> [--follow], deps\n"
                  "\n"
                  "  --exec-path       path to binary inside a tar.gz bundle (triggers bundle upload)\n"
                  "  args <id> \"...\"  set arguments for a session (saved, used on every start)\n"
                  "  env <id> K=V      set an environment variable for a session\n"
                  "  envdel <id> KEY   remove an environment variable\n"
                  "  envlist <id>      list environment variables for a session\n"
-                 "  --follow          continuously stream output (for output command)\n"
-                 "  sysroot <dir>     download device /lib, /lib64, /usr/lib into <dir>\n";
+                 "  --follow          continuously stream output (for output command)\n";
 }
 
 Target parse_target(int &argc, char **argv) {
@@ -310,108 +308,6 @@ int main(int argc, char **argv) {
             offset = total;
             usleep(500000);
         }
-    } else if (cmd == "sysroot") {
-        if (argc < 3) {
-            std::cerr << "usage: debuglanternctl sysroot <dest-dir>\n";
-            return 1;
-        }
-        std::string dest_dir = argv[2];
-
-        // Create dest dir if needed
-        mkdir(dest_dir.c_str(), 0755);
-
-        if (!send_line(fd, "SYSROOT")) {
-            std::cerr << "send failed\n";
-            return 1;
-        }
-
-        // Read response header line: "SYSROOT <size>\n" or error JSON
-        std::string header;
-        if (!read_all(fd, header)) {
-            std::cerr << "read failed\n";
-            return 1;
-        }
-
-        // Check for error response
-        if (header.find("\"ok\":false") != std::string::npos) {
-            std::cout << header;
-            close(fd);
-            return 1;
-        }
-
-        // Parse "SYSROOT <size>"
-        if (header.substr(0, 8) != "SYSROOT ") {
-            std::cerr << "unexpected response: " << header;
-            close(fd);
-            return 1;
-        }
-        size_t size = std::stoull(header.substr(8));
-        std::cerr << "downloading sysroot: " << size << " bytes..." << std::endl;
-
-        // Save to temp file then extract
-        std::string tmppath = dest_dir + "/.sysroot-download.tar";
-        std::ofstream out(tmppath, std::ios::binary);
-        if (!out) {
-            std::cerr << "failed to create " << tmppath << "\n";
-            close(fd);
-            return 1;
-        }
-
-        // read_all may have consumed binary data past the header newline
-        size_t remaining = size;
-        size_t total_read = 0;
-        auto nl = header.find('\n');
-        if (nl != std::string::npos && nl + 1 < header.size()) {
-            std::string overflow = header.substr(nl + 1);
-            size_t take = std::min(overflow.size(), remaining);
-            out.write(overflow.data(), static_cast<std::streamsize>(take));
-            remaining -= take;
-            total_read += take;
-        }
-
-        char buf[65536];
-        while (remaining > 0) {
-            size_t chunk = std::min(remaining, sizeof(buf));
-            ssize_t n = read(fd, buf, chunk);
-            if (n <= 0) {
-                std::cerr << "download interrupted at " << total_read << "/" << size << "\n";
-                break;
-            }
-            out.write(buf, n);
-            remaining -= static_cast<size_t>(n);
-            total_read += static_cast<size_t>(n);
-
-            // Print progress every ~1MB
-            if (total_read % (1024 * 1024) < static_cast<size_t>(n)) {
-                std::cerr << "\r  " << (total_read / (1024 * 1024)) << " / "
-                          << (size / (1024 * 1024)) << " MB" << std::flush;
-            }
-        }
-        out.close();
-        close(fd);
-        std::cerr << "\r  " << (size / (1024 * 1024)) << " / "
-                  << (size / (1024 * 1024)) << " MB - done" << std::endl;
-
-        if (total_read != size) {
-            std::cerr << "incomplete download\n";
-            unlink(tmppath.c_str());
-            return 1;
-        }
-
-        // Extract
-        std::cerr << "extracting to " << dest_dir << "..." << std::endl;
-        std::string tar_cmd = "tar xf " + tmppath + " -C " + dest_dir;
-        int ret = system(tar_cmd.c_str());
-        unlink(tmppath.c_str());
-
-        if (ret != 0) {
-            std::cerr << "extraction failed\n";
-            return 1;
-        }
-
-        std::cerr << "sysroot saved to " << dest_dir << std::endl;
-        std::cout << "{\"ok\":true,\"path\":\"" << dest_dir << "\"}\n";
-        return 0;
     } else {
         std::ostringstream oss;
         std::string verb = argv[1];

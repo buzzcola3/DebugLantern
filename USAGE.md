@@ -255,34 +255,6 @@ build locally  →  upload  →  start  →  attach gdb  →  fix bug  →  re-u
 
 No SSH. No SCP. No filesystem pollution. Everything ephemeral.
 
-## Download Device Sysroot
-
-Download the device's shared libraries for GDB debug symbol resolution (uncompressed tar):
-
-```sh
-debuglanternctl sysroot ~/pi-sysroot --target target-board.local
-```
-
-```
-downloading sysroot: 1216706560 bytes...
-  1160 / 1160 MB - done
-extracting to /home/user/pi-sysroot...
-sysroot saved to /home/user/pi-sysroot
-```
-
-```json
-{"ok":true,"path":"/home/user/pi-sysroot"}
-```
-
-Then in GDB, point to the downloaded sysroot:
-
-```
-(gdb) set sysroot /home/user/pi-sysroot
-(gdb) target remote 192.168.1.50:5504
-```
-
-GDB will automatically load debug symbols for shared libraries from the sysroot. This is especially useful for cross-architecture debugging (e.g., x86 host debugging an ARM64 target with `gdb-multiarch`).
-
 ## Check System Dependencies
 
 Verify the target device has all required tools installed:
@@ -295,7 +267,7 @@ debuglanternctl deps --target target-board.local
 {
   "deps": [
     { "name": "gdbserver", "description": "Required for debug attach and start --debug", "available": true, "required": true },
-    { "name": "tar", "description": "Required for bundle extraction and sysroot creation", "available": true, "required": true },
+    { "name": "tar", "description": "Required for bundle extraction", "available": true, "required": true },
     { "name": "gzip", "description": "Optional: only required if you upload gzip-compressed bundles", "available": true, "required": false }
   ],
   "all_satisfied": true

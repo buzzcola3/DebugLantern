@@ -236,12 +236,6 @@ struct ClientConn {
     std::string exec_path;
     int upload_tmpfd = -1;
     std::string upload_tmppath;
-    bool transferred = false;
-};
-
-struct SysrootProgressInfo {
-    pid_t child_pid = -1;
-    std::string buffer;
 };
 
 struct ActivityEntry {
@@ -416,12 +410,6 @@ public:
                     continue;
                 }
 
-                auto sysroot_it = sysroot_progress_.find(fd);
-                if (sysroot_it != sysroot_progress_.end()) {
-                    handle_sysroot_progress(fd, sysroot_it->second);
-                    continue;
-                }
-
                 auto conn_it = clients_.find(fd);
                 if (conn_it != clients_.end()) {
                     handle_client(conn_it->second);
@@ -490,20 +478,12 @@ private:
             }
         }
 
-        while (!conn.in_upload && !conn.transferred) {
+        while (!conn.in_upload) {
             auto line = read_line(conn.inbuf);
             if (!line.has_value()) {
                 break;
             }
             handle_command(conn, *line);
-            if (conn.transferred) break;
-        }
-
-        if (conn.transferred) {
-            // fd ownership transferred to child process (sysroot)
-            epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, conn.fd, nullptr);
-            clients_.erase(conn.fd);
-            return;
         }
 
         // Consume any buffered upload data after entering upload mode
@@ -884,11 +864,6 @@ private:
             std::string id;
             iss >> id;
             handle_delete(conn.fd, id);
-            return;
-        }
-
-        if (cmd == "SYSROOT") {
-            handle_sysroot(conn);
             return;
         }
 
@@ -1486,9 +1461,6 @@ private:
         if (code == "tmpdir_create_failed") return "failed to create temporary directory";
         if (code == "extract_failed") return "failed to extract tar.gz bundle";
         if (code == "invalid_env") return "env format must be KEY=VALUE";
-        if (code == "sysroot_tmpfile_failed") return "failed to create temp file for sysroot";
-        if (code == "sysroot_no_libs") return "no lib directories found on host";
-        if (code == "sysroot_tar_failed") return "failed to create sysroot tarball";
         return "unspecified error";
     }
 
@@ -1499,234 +1471,6 @@ private:
             << debuglantern::json_kv("message", error_message(err), true) << ","
             << debuglantern::json_kv("time", debuglantern::now_iso8601(), true) << "}\n";
         send_response(fd, oss.str());
-    }
-
-    void handle_sysroot(ClientConn &conn) {
-        int fd = conn.fd;
-
-        // Collect lib dirs that exist
-        std::vector<std::string> dirs;
-        struct stat st;
-        if (::stat("/lib", &st) == 0) dirs.push_back("/lib");
-        if (::stat("/lib64", &st) == 0) dirs.push_back("/lib64");
-        if (::stat("/usr/lib", &st) == 0) dirs.push_back("/usr/lib");
-        if (::stat("/usr/lib/debug", &st) == 0) dirs.push_back("/usr/lib/debug");
-
-        if (dirs.empty()) {
-            send_error(fd, "sysroot_no_libs");
-            return;
-        }
-
-        // Create pipe for progress messages from child to parent
-        int progress_pipe[2];
-        if (pipe(progress_pipe) < 0) {
-            send_error(fd, "sysroot_tmpfile_failed");
-            return;
-        }
-
-        add_activity("sysroot: starting collection...");
-
-        pid_t child = fork();
-        if (child < 0) {
-            close(progress_pipe[0]);
-            close(progress_pipe[1]);
-            send_error(fd, "sysroot_tmpfile_failed");
-            return;
-        }
-
-        if (child == 0) {
-            // Child process — handles tar + streaming to client
-            close(progress_pipe[0]);  // close read end
-
-            // Clear non-blocking flag inherited from accept4(SOCK_NONBLOCK)
-            // so that read/write on the client socket block properly.
-            {
-                int fl = fcntl(fd, F_GETFL);
-                if (fl >= 0) fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
-            }
-
-            // Helper: write all bytes, retrying on EINTR/EAGAIN
-            auto write_all = [](int wfd, const void *data, size_t len) -> bool {
-                const char *p = static_cast<const char *>(data);
-                size_t off = 0;
-                while (off < len) {
-                    ssize_t nw = write(wfd, p + off, len - off);
-                    if (nw > 0) {
-                        off += static_cast<size_t>(nw);
-                    } else if (nw == 0) {
-                        return false;
-                    } else {
-                        if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
-                            usleep(1000);  // 1ms backoff
-                            continue;
-                        }
-                        return false;
-                    }
-                }
-                return true;
-            };
-
-            auto progress = [&](const std::string &msg) {
-                std::string line = msg + "\n";
-                ssize_t w = write(progress_pipe[1], line.data(), line.size());
-                (void)w;
-            };
-
-            // Build dir list string for messages
-            std::string dir_list;
-            for (size_t i = 0; i < dirs.size(); ++i) {
-                if (i > 0) dir_list += ", ";
-                dir_list += dirs[i];
-            }
-            progress("sysroot: collecting " + dir_list + "...");
-
-            // Create temp file for the sysroot tarball
-            char tmppath[] = "/tmp/debuglantern-sysroot-XXXXXX";
-            int tmpfd = mkstemp(tmppath);
-            if (tmpfd < 0) {
-                progress("sysroot: error — failed to create temp file");
-                close(progress_pipe[1]);
-                std::string err = "{\"ok\":false,\"error_code\":\"sysroot_tmpfile_failed\","
-                                  "\"message\":\"failed to create temp file for sysroot\"}\n";
-                write_all(fd, err.data(), err.size());
-                close(fd);
-                _exit(1);
-            }
-            close(tmpfd);
-
-            // Build tar command — no compression for speed on device
-            std::string tar_cmd = "tar cf ";
-            tar_cmd += tmppath;
-            tar_cmd += " --dereference";
-            for (const auto &d : dirs) {
-                tar_cmd += " " + d;
-            }
-            tar_cmd += " 2>/dev/null";
-
-            int ret = system(tar_cmd.c_str());
-
-            struct stat tarstat;
-            if (::stat(tmppath, &tarstat) != 0 || tarstat.st_size == 0) {
-                progress("sysroot: error — tar failed");
-                unlink(tmppath);
-                close(progress_pipe[1]);
-                std::string err = "{\"ok\":false,\"error_code\":\"sysroot_tar_failed\","
-                                  "\"message\":\"failed to create sysroot tarball\"}\n";
-                write_all(fd, err.data(), err.size());
-                close(fd);
-                _exit(1);
-            }
-            (void)ret;
-
-            size_t size = static_cast<size_t>(tarstat.st_size);
-            progress("sysroot: tarball ready, " + std::to_string(size / (1024*1024)) + " MB");
-
-            // Send header
-            std::string header = "SYSROOT " + std::to_string(size) + "\n";
-            if (!write_all(fd, header.data(), header.size())) {
-                progress("sysroot: error — client disconnected before transfer");
-                unlink(tmppath);
-                close(progress_pipe[1]);
-                close(fd);
-                _exit(1);
-            }
-
-            // Stream the tarball to the client
-            int tfd = open(tmppath, O_RDONLY);
-            if (tfd < 0) {
-                progress("sysroot: error — can't read tarball");
-                unlink(tmppath);
-                close(progress_pipe[1]);
-                close(fd);
-                _exit(1);
-            }
-
-            progress("sysroot: streaming to client...");
-
-            char buf[65536];
-            size_t remaining = size;
-            size_t sent = 0;
-            size_t last_progress_mb = 0;
-            bool ok = true;
-            while (remaining > 0) {
-                size_t chunk = std::min(remaining, sizeof(buf));
-                ssize_t nr = read(tfd, buf, chunk);
-                if (nr <= 0) {
-                    if (nr < 0 && errno == EINTR) continue;
-                    progress("sysroot: error — read from tarball failed");
-                    ok = false;
-                    break;
-                }
-                if (!write_all(fd, buf, static_cast<size_t>(nr))) {
-                    progress("sysroot: error — client disconnected at "
-                             + std::to_string(sent / (1024*1024)) + " / "
-                             + std::to_string(size / (1024*1024)) + " MB");
-                    ok = false;
-                    break;
-                }
-                remaining -= static_cast<size_t>(nr);
-                sent += static_cast<size_t>(nr);
-
-                // Report progress every 10 MB
-                size_t mb = sent / (1024 * 1024);
-                if (mb >= last_progress_mb + 10) {
-                    last_progress_mb = mb;
-                    progress("sysroot: sent " + std::to_string(mb) + " / "
-                             + std::to_string(size / (1024*1024)) + " MB");
-                }
-            }
-
-            close(tfd);
-            unlink(tmppath);
-            if (ok) {
-                progress("sysroot: download complete (" + std::to_string(size / (1024*1024)) + " MB)");
-            }
-            close(progress_pipe[1]);
-            close(fd);
-            _exit(0);
-        }
-
-        // Parent process
-        close(progress_pipe[1]);  // close write end
-
-        // Make progress pipe non-blocking and add to epoll
-        int flags = fcntl(progress_pipe[0], F_GETFL);
-        fcntl(progress_pipe[0], F_SETFL, flags | O_NONBLOCK);
-
-        epoll_event ev{};
-        ev.events = EPOLLIN;
-        ev.data.fd = progress_pipe[0];
-        epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, progress_pipe[0], &ev);
-
-        sysroot_progress_[progress_pipe[0]] = SysrootProgressInfo{child, ""};
-
-        // Transfer fd ownership to child — parent must not close or use it
-        conn.transferred = true;
-    }
-
-    void handle_sysroot_progress(int pipefd, SysrootProgressInfo &info) {
-        char buf[4096];
-        ssize_t n = read(pipefd, buf, sizeof(buf));
-        if (n <= 0) {
-            // EOF or error — child is done
-            epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, pipefd, nullptr);
-            close(pipefd);
-            if (info.child_pid > 0) {
-                waitpid(info.child_pid, nullptr, WNOHANG);
-            }
-            sysroot_progress_.erase(pipefd);
-            return;
-        }
-
-        info.buffer.append(buf, static_cast<size_t>(n));
-        size_t pos;
-        while ((pos = info.buffer.find('\n')) != std::string::npos) {
-            std::string msg = info.buffer.substr(0, pos);
-            info.buffer.erase(0, pos + 1);
-            if (!msg.empty()) {
-                add_activity(msg);
-            }
-        }
     }
 
     void add_activity(const std::string &message) {
@@ -1852,7 +1596,6 @@ private:
     std::unordered_map<int, ClientConn> clients_;
     std::unordered_map<int, WatchInfo> watches_;
     std::unordered_map<int, OutputPipeInfo> output_pipes_;
-    std::unordered_map<int, SysrootProgressInfo> sysroot_progress_;
     std::unordered_map<std::string, Session> sessions_;
     std::vector<ActivityEntry> activity_log_;
     size_t total_bytes_ = 0;

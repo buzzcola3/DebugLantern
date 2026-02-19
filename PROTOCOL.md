@@ -53,13 +53,6 @@ SP             := " "
 - `DEPS`
   - Returns a JSON object listing required system dependencies and whether each is available on the host.
   - No arguments.
-- `SYSROOT`
-  - Downloads an uncompressed tar archive of the device's shared libraries for use as a GDB sysroot (no gzip compression).
-  - No arguments.
-  - Collects `/lib`, `/lib64`, `/usr/lib`, and `/usr/lib/debug` (with symlinks dereferenced).
-  - Response: `SYSROOT <size>\n` header followed by `<size>` raw bytes of tar data.
-  - On error, returns a standard JSON error response instead.
-
 - `ACTIVITY`
   - Returns recent daemon activity entries for display in the web UI or CLI.
   - No arguments.
@@ -117,25 +110,6 @@ Server:
 
 ```
 { "id": "...", "state": "LOADED", "size": 52428800, "bundle": true, "exec_path": "my_app/my_app" }\n
-```
-
-## Sysroot Response Example
-
-```
-SYSROOT
-```
-
-Success:
-
-```
-SYSROOT 104857600
-<104857600 raw bytes of tar>
-```
-
-Error:
-
-```json
-{ "ok": false, "error_code": "sysroot_no_libs", "message": "no system library directories found", "time": "2026-02-18T12:00:00Z" }
 ```
 
 ## Notes
