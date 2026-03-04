@@ -22,6 +22,7 @@ private:
 
     std::string proxy(const std::string &command);
     std::string proxy_upload(const char *data, size_t len);
+    std::string generate_flamegraph(const std::string &session_id, int duration);
 
     int web_port_;
     int control_port_;

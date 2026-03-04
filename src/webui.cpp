@@ -7,8 +7,11 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <map>
 #include <sstream>
 #include <thread>
 #include <vector>
@@ -88,6 +91,7 @@ th{color:var(--gray);font-size:.75rem;text-transform:uppercase;letter-spacing:1p
 .activity-panel h3 button:hover{border-color:var(--accent);color:var(--text)}
 .activity-content{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:.75rem;max-height:200px;overflow-y:auto;white-space:pre-wrap;word-wrap:break-word;line-height:1.5;color:var(--yellow)}
 .activity-content .time{color:var(--gray);margin-right:8px}
+#flamegraph-content svg{max-width:100%;height:auto}
 </style>
 </head>
 <body>
@@ -119,6 +123,10 @@ th{color:var(--gray);font-size:.75rem;text-transform:uppercase;letter-spacing:1p
   <div class="output-panel" id="output-panel">
     <h3><span>Output: <span id="output-session-id"></span></span><span><button onclick="clearOutput()">Clear</button> <button onclick="closeOutput()">Close</button></span></h3>
     <div class="output-content" id="output-content"></div>
+  </div>
+  <div class="output-panel" id="flamegraph-panel">
+    <h3><span>&#x1F525; Flamegraph: <span id="flamegraph-session-id"></span></span><span><button onclick="closeFlamegraph()">Close</button></span></h3>
+    <div id="flamegraph-content" style="overflow-x:auto;text-align:center"></div>
   </div>
   <div class="activity-panel" id="activity-panel">
     <h3><span>&#x1F4CB; Activity</span><span><button onclick="clearActivity()">Clear</button></span></h3>
@@ -162,12 +170,14 @@ function actionButtons(s){
   }
   if(s.state==='RUNNING'){
     h+='<button onclick="showOutput(\''+s.id+'\')">&#x23F5; Output</button>';
+    h+='<button onclick="startFlamegraph(\''+s.id+'\')">&#x1F525; Flamegraph</button>';
     h+='<button onclick="act(\'debug\',\''+s.id+'\')">&#x1F41B; Attach GDB</button>';
     h+='<button onclick="act(\'stop\',\''+s.id+'\')">&#x23F9; Stop</button>';
     h+='<button class="danger" onclick="act(\'kill\',\''+s.id+'\')">&#x2620; Kill</button>';
   }
   if(s.state==='DEBUGGING'){
     h+='<button onclick="showOutput(\''+s.id+'\')">&#x23F5; Output</button>';
+    h+='<button onclick="startFlamegraph(\''+s.id+'\')">&#x1F525; Flamegraph</button>';
     h+='<button onclick="act(\'stop\',\''+s.id+'\')">&#x23F9; Stop</button>';
     h+='<button class="danger" onclick="act(\'kill\',\''+s.id+'\')">&#x2620; Kill</button>';
   }
@@ -351,6 +361,33 @@ function closeOutput(){
 
 function clearOutput(){
   $('output-content').textContent='';
+}
+
+async function startFlamegraph(id){
+  toast('Profiling for 5 seconds...');
+  $('flamegraph-session-id').textContent=id.substring(0,8)+'...';
+  $('flamegraph-content').innerHTML='<p style="color:var(--gray);padding:24px">Recording CPU samples (5s)...</p>';
+  $('flamegraph-panel').style.display='block';
+  try{
+    const r=await fetch('/api/sessions/'+id+'/flamegraph?duration=5');
+    const ct=r.headers.get('content-type')||'';
+    if(ct.includes('svg')){
+      $('flamegraph-content').innerHTML=await r.text();
+      toast('Flamegraph ready');
+    }else{
+      const d=await r.json();
+      toast(d.error||'Flamegraph failed',true);
+      $('flamegraph-content').innerHTML='<p style="color:var(--accent);padding:24px">Failed to generate flamegraph. Is perf installed?</p>';
+    }
+  }catch(e){
+    toast('Flamegraph failed: '+e.message,true);
+    $('flamegraph-content').innerHTML='<p style="color:var(--accent);padding:24px">'+e.message+'</p>';
+  }
+}
+
+function closeFlamegraph(){
+  $('flamegraph-panel').style.display='none';
+  $('flamegraph-content').innerHTML='';
 }
 
 async function upload(file){
@@ -545,6 +582,179 @@ std::string trim_newlines(const std::string &s) {
     return (e == std::string::npos) ? "" : s.substr(0, e + 1);
 }
 
+// ---------------------------------------------------------------------------
+// Flamegraph helpers (run in WebUI thread, safe to block)
+// ---------------------------------------------------------------------------
+
+struct FlameNode {
+    std::string name;
+    int self_samples = 0;
+    std::map<std::string, FlameNode> children;
+};
+
+static int flame_total(const FlameNode &n) {
+    int t = n.self_samples;
+    for (const auto &c : n.children) t += flame_total(c.second);
+    return t;
+}
+
+static int flame_depth(const FlameNode &n) {
+    int d = 0;
+    for (const auto &c : n.children)
+        d = std::max(d, 1 + flame_depth(c.second));
+    return d;
+}
+
+// Parse perf-script output into folded stacks (like stackcollapse-perf.pl)
+static std::map<std::string, int> collapse_perf_script(const std::string &input) {
+    std::map<std::string, int> stacks;
+    std::istringstream iss(input);
+    std::string line;
+    std::vector<std::string> frames;
+
+    auto flush = [&]() {
+        if (frames.empty()) return;
+        // perf script gives leaf-first; reverse to root-first
+        std::reverse(frames.begin(), frames.end());
+        std::string key;
+        for (size_t i = 0; i < frames.size(); ++i) {
+            if (i) key += ';';
+            key += frames[i];
+        }
+        stacks[key]++;
+        frames.clear();
+    };
+
+    while (std::getline(iss, line)) {
+        if (line.empty()) { flush(); continue; }
+        if (line[0] == '\t' || line[0] == ' ') {
+            // Stack frame line: "    addr func+offset (module)"
+            size_t p = line.find_first_not_of(" \t");
+            if (p == std::string::npos) continue;
+            size_t sp = line.find(' ', p);
+            if (sp == std::string::npos) continue;
+            size_t fs = line.find_first_not_of(" ", sp);
+            if (fs == std::string::npos) continue;
+            size_t fe = line.find_first_of("+ (", fs);
+            std::string func = (fe != std::string::npos)
+                ? line.substr(fs, fe - fs) : line.substr(fs);
+            if (!func.empty() && func[0] != '(')
+                frames.push_back(func);
+        } else {
+            flush();  // header line for next sample
+        }
+    }
+    flush();
+    return stacks;
+}
+
+static FlameNode build_flame_tree(const std::map<std::string, int> &stacks) {
+    FlameNode root;
+    root.name = "all";
+    for (const auto &kv : stacks) {
+        FlameNode *node = &root;
+        std::istringstream iss(kv.first);
+        std::string fn;
+        while (std::getline(iss, fn, ';')) {
+            auto &child = node->children[fn];
+            if (child.name.empty()) child.name = fn;
+            node = &child;
+        }
+        node->self_samples += kv.second;
+    }
+    return root;
+}
+
+static std::string flame_color(const std::string &name) {
+    unsigned h = 0;
+    for (char c : name) h = h * 31 + static_cast<unsigned>(c);
+    int r = 200 + static_cast<int>(h % 55);
+    int g = 80 + static_cast<int>((h >> 8) % 60);
+    int b = 10 + static_cast<int>((h >> 16) % 30);
+    char buf[8];
+    snprintf(buf, sizeof(buf), "#%02x%02x%02x", r, g, b);
+    return buf;
+}
+
+static std::string svg_escape(const std::string &s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        switch (c) {
+            case '<': out += "&lt;"; break;
+            case '>': out += "&gt;"; break;
+            case '&': out += "&amp;"; break;
+            case '"': out += "&quot;"; break;
+            default: out += c;
+        }
+    }
+    return out;
+}
+
+static void render_flame_node(std::ostringstream &svg, const FlameNode &node,
+                              int level, double x, int total, int max_depth,
+                              int svg_w, int cell_h, int top_margin) {
+    int nt = flame_total(node);
+    double w = (static_cast<double>(nt) / total) * (svg_w - 20);
+    if (w < 0.5) return;
+    double y = top_margin + (max_depth - level) * cell_h;
+    std::string col = (level == 0) ? "#4ecca3" : flame_color(node.name);
+
+    svg << "<g><title>" << svg_escape(node.name) << " (" << nt
+        << " samples, " << (total > 0 ? nt * 100 / total : 0)
+        << "%)</title><rect x=\"" << (10 + x) << "\" y=\"" << y
+        << "\" width=\"" << w << "\" height=\"" << (cell_h - 1)
+        << "\" fill=\"" << col << "\" rx=\"2\"/>";
+    if (w > 30) {
+        int mc = static_cast<int>(w / 7);
+        std::string label = node.name;
+        if (mc > 2 && static_cast<int>(label.size()) > mc)
+            label = label.substr(0, mc - 2) + "..";
+        svg << "<text x=\"" << (10 + x + 3) << "\" y=\"" << (y + cell_h - 5)
+            << "\" fill=\"#000\" font-size=\"11\" "
+            << "style=\"pointer-events:none\">"
+            << svg_escape(label) << "</text>";
+    }
+    svg << "</g>\n";
+
+    double cx = x;
+    for (const auto &c : node.children) {
+        render_flame_node(svg, c.second, level + 1, cx, total,
+                          max_depth, svg_w, cell_h, top_margin);
+        cx += (static_cast<double>(flame_total(c.second)) / total) * (svg_w - 20);
+    }
+}
+
+static std::string generate_flamegraph_svg(const FlameNode &root, int total) {
+    if (total == 0)
+        return "<svg xmlns='http://www.w3.org/2000/svg' width='600' height='40'>"
+               "<text y='20' fill='#e0e0e0' font-family='monospace'>"
+               "No samples collected</text></svg>";
+
+    int depth = flame_depth(root);
+    int cell_h = 18;
+    int svg_w = 1200;
+    int top_margin = 60;
+    int svg_h = top_margin + (depth + 1) * cell_h + 10;
+
+    std::ostringstream svg;
+    svg << "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" << svg_w
+        << "\" height=\"" << svg_h << "\" viewBox=\"0 0 " << svg_w << " "
+        << svg_h << "\" style=\"background:#0f0f23;"
+        << "font-family:'SF Mono','Fira Code',monospace\">\n";
+    svg << "<text x=\"" << svg_w / 2 << "\" y=\"24\" text-anchor=\"middle\" "
+        << "fill=\"#e94560\" font-size=\"16\" font-weight=\"bold\">"
+        << "Flamegraph</text>\n";
+    svg << "<text x=\"" << svg_w / 2 << "\" y=\"42\" text-anchor=\"middle\" "
+        << "fill=\"#666\" font-size=\"11\">" << total
+        << " samples</text>\n";
+
+    render_flame_node(svg, root, 0, 0, total, depth, svg_w, cell_h, top_margin);
+
+    svg << "</svg>\n";
+    return svg.str();
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -683,6 +893,32 @@ void WebUI::handle_client(int fd) {
         }
         auto resp = proxy("OUTPUT " + parts[2] + " " + offset);
         send_http(fd, 200, "application/json", resp);
+        return;
+    }
+
+    // GET /api/sessions/{id}/flamegraph?duration=5
+    if (req.method == "GET" && parts.size() == 4 &&
+        parts[0] == "api" && parts[1] == "sessions" && parts[3] == "flamegraph") {
+        int duration = 5;
+        auto dpos = req.query.find("duration=");
+        if (dpos != std::string::npos) {
+            auto dval = req.query.substr(dpos + 9);
+            auto amp = dval.find('&');
+            if (amp != std::string::npos) dval = dval.substr(0, amp);
+            try { duration = std::stoi(dval); } catch (...) {}
+            if (duration < 1) duration = 1;
+            if (duration > 30) duration = 30;
+        }
+        // Extend socket timeout for profiling duration
+        struct timeval ltv{duration + 15, 0};
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &ltv, sizeof(ltv));
+        auto svg = generate_flamegraph(parts[2], duration);
+        if (svg.empty()) {
+            send_http(fd, 400, "application/json",
+                      R"({"error":"flamegraph_failed"})");
+        } else {
+            send_http(fd, 200, "image/svg+xml", svg);
+        }
         return;
     }
 
@@ -855,6 +1091,62 @@ std::string WebUI::proxy_upload(const char *data, size_t len) {
 
     close(fd);
     return trim_newlines(resp);
+}
+
+std::string WebUI::generate_flamegraph(const std::string &session_id,
+                                       int duration) {
+    // 1. Get PID from session status
+    auto status = proxy("STATUS " + session_id);
+    auto pid_pos = status.find("\"pid\":");
+    if (pid_pos == std::string::npos) return "";
+    size_t ps = pid_pos + 6;
+    size_t pe = status.find_first_of(",}", ps);
+    std::string pid_str = status.substr(ps, pe - ps);
+    while (!pid_str.empty() && pid_str[0] == ' ') pid_str.erase(0, 1);
+    if (pid_str == "null" || pid_str.empty()) return "";
+    for (char c : pid_str) {
+        if (!isdigit(c)) return "";
+    }
+
+    // 2. Run perf record
+    std::string perf_data = "/tmp/debuglantern-perf-" + session_id + ".data";
+    {
+        std::string cmd = "perf record -F 99 -p " + pid_str + " -g -o "
+                          + perf_data + " -- sleep "
+                          + std::to_string(duration) + " 2>/dev/null";
+        int ret = ::system(cmd.c_str());
+        if (ret != 0) {
+            unlink(perf_data.c_str());
+            return "<svg xmlns='http://www.w3.org/2000/svg' width='600' "
+                   "height='40'><text y='20' fill='#e94560' "
+                   "font-family='monospace'>perf record failed "
+                   "(is perf installed? check perf_event_paranoid)"
+                   "</text></svg>";
+        }
+    }
+
+    // 3. Run perf script and capture output
+    std::string script_output;
+    {
+        std::string cmd = "perf script -i " + perf_data + " 2>/dev/null";
+        FILE *fp = popen(cmd.c_str(), "r");
+        if (!fp) {
+            unlink(perf_data.c_str());
+            return "";
+        }
+        char buf[4096];
+        while (fgets(buf, sizeof(buf), fp))
+            script_output += buf;
+        pclose(fp);
+    }
+    unlink(perf_data.c_str());
+
+    // 4. Collapse stacks and build flame tree
+    auto stacks = collapse_perf_script(script_output);
+    auto tree = build_flame_tree(stacks);
+    int total = flame_total(tree);
+
+    return generate_flamegraph_svg(tree, total);
 }
 
 }  // namespace debuglantern

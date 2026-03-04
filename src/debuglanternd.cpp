@@ -297,6 +297,7 @@ std::vector<DepStatus> check_dependencies() {
     deps.push_back({"gdbserver", "Required for debug attach and start --debug", check_cmd("gdbserver"), true});
     deps.push_back({"tar", "Required for bundle (tar.gz) extraction", check_cmd("tar"), true});
     deps.push_back({"gzip", "Required for bundle (tar.gz) decompression", check_cmd("gzip"), true});
+    deps.push_back({"perf", "Optional: CPU profiling for flamegraph generation", check_cmd("perf"), false});
 
     return deps;
 }
