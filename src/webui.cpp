@@ -1111,7 +1111,11 @@ std::string WebUI::generate_flamegraph(const std::string &session_id,
     // 2. Run perf record
     std::string perf_data = "/tmp/debuglantern-perf-" + session_id + ".data";
     {
-        std::string cmd = "perf record -F 99 -p " + pid_str + " -g -o "
+        // Use cpu-clock (software event) so profiling works on boards without
+        // a kernel PMU driver.  --call-graph dwarf produces accurate stacks
+        // even when binaries are compiled without frame pointers (clang default).
+        std::string cmd = "perf record -F 99 -p " + pid_str
+                          + " --call-graph dwarf -e cpu-clock -o "
                           + perf_data + " -- sleep "
                           + std::to_string(duration) + " 2>/dev/null";
         int ret = ::system(cmd.c_str());
